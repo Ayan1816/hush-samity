@@ -1,0 +1,23 @@
+@import "tailwindcss";
+
+:root {
+  color-scheme: dark;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: #0c1210;
+  color: #e7f2ec;
+}
+
+.samity-card {
+  border-color: rgba(167, 243, 208, 0.72);
+  transition: border-color 150ms ease, box-shadow 150ms ease;
+}
+
+.samity-card:hover,
+.samity-card:focus-within {
+  border-color: rgb(110, 231, 183);
+  box-shadow: 0 0 0 1px rgba(52, 211, 153, 0.45), 0 0 22px rgba(16, 185, 129, 0.32);
+}

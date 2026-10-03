@@ -1,0 +1,14 @@
+packages:
+  - "frontend"
+allowBuilds:
+  "@fhenixprotocol/cofhe-contracts": true
+  bufferutil: false
+  keccak: true
+  secp256k1: true
+  unrs-resolver: true
+  utf-8-validate: false
+# @cofhe/sdk@0.7.1 depends on viem 2.38.6. Keep every workspace on that pin.
+overrides:
+  viem: 2.38.6
+patchedDependencies:
+  '@nomicfoundation/solidity-analyzer@0.1.2': patches/@nomicfoundation__solidity-analyzer@0.1.2.patch

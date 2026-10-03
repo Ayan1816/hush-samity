@@ -1,0 +1,43 @@
+diff --git a/index.js b/index.js
+index 96085ecd7fceff49ac477ff3b6b7d5fb440d9bd1..5a4eb2f0f2088781568eaf3d875f986abbb4ed5d 100644
+--- a/index.js
++++ b/index.js
+@@ -316,13 +316,32 @@ switch (platform) {
+     throw new Error(`Unsupported OS: ${platform}, architecture: ${arch}`);
+ }
+ 
++function analyzeWithRegex(input) {
++  const withoutComments = input
++    .replace(/\/\*[\s\S]*?\*\//g, "")
++    .replace(/\/\/.*$/gm, "");
++  const imports = [];
++  const importRe = /import\s+(?:[^'"]*?\s+from\s+)?['"]([^'"]+)['"]/g;
++  let match;
++  while ((match = importRe.exec(withoutComments))) {
++    imports.push(match[1]);
++  }
++  const versionPragmas = [];
++  const pragmaRe = /pragma\s+solidity\s+([^;]+);/g;
++  while ((match = pragmaRe.exec(withoutComments))) {
++    versionPragmas.push(match[1].trim());
++  }
++  return { versionPragmas, imports };
++}
++
+ if (!nativeBinding) {
+-  if (loadError) {
++  if (platform === "android") {
++    module.exports.analyze = analyzeWithRegex;
++  } else if (loadError) {
+     throw loadError;
++  } else {
++    throw new Error(`Failed to load native binding`);
+   }
+-  throw new Error(`Failed to load native binding`);
++} else {
++  module.exports.analyze = nativeBinding.analyze;
+ }
+-
+-const { analyze } = nativeBinding;
+-
+-module.exports.analyze = analyze;
