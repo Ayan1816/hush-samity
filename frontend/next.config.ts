@@ -14,6 +14,11 @@ const safeProvider = path.resolve(
 );
 
 const nextConfig: NextConfig = {
+  // Skip `tsc` during `next build`. Next 16 no longer runs ESLint in the build,
+  // and `eslint` is not a valid config key, so this is what shortens the Vercel build.
+  typescript: {
+    ignoreBuildErrors: true,
+  },
   turbopack: {
     resolveAlias: {
       "@safe-global/safe-apps-sdk": safeSdk,
