@@ -1,5 +1,7 @@
 import { CreateSamity } from "@/src/components/CreateSamity";
+import { HowItWorks } from "@/src/components/HowItWorks";
 import { JoinSamity } from "@/src/components/JoinSamity";
+import { MySamities } from "@/src/components/MySamities";
 
 export default function HomePage() {
   return (
@@ -11,7 +13,9 @@ export default function HomePage() {
           verified.
         </p>
       </section>
+      <HowItWorks />
       <CreateSamity />
+      <MySamities />
       <JoinSamity />
     </main>
   );

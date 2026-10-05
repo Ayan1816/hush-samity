@@ -96,6 +96,13 @@ export const samityAbi = [
   },
   {
     type: "function",
+    name: "creator",
+    stateMutability: "view",
+    inputs: [],
+    outputs: [{ name: "", type: "address" }],
+  },
+  {
+    type: "function",
     name: "installmentAmount",
     stateMutability: "view",
     inputs: [],

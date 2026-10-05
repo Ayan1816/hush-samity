@@ -4,6 +4,7 @@ import { EncryptStep, Encryptable, isCofheError, type EncryptStepCallbackContext
 import { useState } from "react";
 import { isAddress } from "viem";
 import { useAccount, usePublicClient, useReadContract, useWalletClient } from "wagmi";
+import { Skeleton } from "@/src/components/Skeleton";
 import { cofheClient, connectCofheClient, isSupportedChainId, supportedChains } from "@/src/config/cofhe";
 
 const ENCRYPT_STEPS = [
@@ -182,13 +183,15 @@ export function SealBid({ bidEngineAddress, onSealed }: SealBidProps) {
         <div className="flex justify-between gap-4">
           <dt className="text-emerald-50/60">Creator cap</dt>
           <dd>
-            {capQuery.isLoading
-              ? "Reading…"
-              : capQuery.data != null
-                ? `${capQuery.data.toString()} bps`
-                : capQuery.error
-                  ? errorText(capQuery.error)
-                  : "Unavailable"}
+            {capQuery.isLoading ? (
+              <Skeleton className="inline-block h-3 w-16 align-middle" />
+            ) : capQuery.data != null ? (
+              `${capQuery.data.toString()} bps`
+            ) : capQuery.error ? (
+              errorText(capQuery.error)
+            ) : (
+              "Unavailable"
+            )}
           </dd>
         </div>
       </dl>
@@ -214,7 +217,7 @@ export function SealBid({ bidEngineAddress, onSealed }: SealBidProps) {
 
       <button
         type="button"
-        className="rounded-lg bg-emerald-400 px-4 py-2 text-sm font-semibold text-emerald-950 disabled:opacity-40"
+        className="w-full rounded-lg bg-emerald-400 px-4 py-2 text-sm font-semibold text-emerald-950 disabled:opacity-40"
         onClick={() => {
           void sealBid();
         }}

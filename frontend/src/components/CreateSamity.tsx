@@ -1,13 +1,16 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { formatUnits, isAddress, parseUnits, zeroAddress, type Address } from "viem";
 import { useAccount, useBytecode, useDeployContract, usePublicClient, useReadContract, useReadContracts } from "wagmi";
 import { wagmiConfig } from "@/lib/wagmi";
+import { Skeleton } from "@/src/components/Skeleton";
+import { pushToast } from "@/src/components/Toast";
 import { erc20Abi, samityAbi } from "@/src/lib/abis";
 import { isSupportedChainId } from "@/src/config/cofhe";
 import { errorText } from "@/src/lib/errors";
+import { waitForSuccess } from "@/src/lib/receipt";
 
 const MAX_DISCOUNT_BPS = 10_000;
 const WEEK_SECONDS = 7 * 24 * 60 * 60;
@@ -97,6 +100,32 @@ function durationError(mode: DurationMode, custom: string, submitted: boolean): 
   return null;
 }
 
+function quietAmount(raw: string, decimals: number): bigint | null {
+  try {
+    return tokenAmount("Amount", raw, decimals);
+  } catch {
+    return null;
+  }
+}
+
+function quietMembers(raw: string): bigint | null {
+  const trimmed = raw.trim();
+  if (!/^\d+$/.test(trimmed)) return null;
+  const value = BigInt(trimmed);
+  return value === 0n ? null : value;
+}
+
+function quietBps(raw: string): bigint | null {
+  if (raw.trim() === "" || discountError(raw, false)) return null;
+  return BigInt(raw.trim());
+}
+
+function tokenText(amount: bigint | null, decimals: number | undefined, symbol: string | undefined): string {
+  if (amount == null || decimals == null) return "—";
+  const formatted = formatUnits(amount, decimals);
+  return symbol ? `${formatted} ${symbol}` : formatted;
+}
+
 function discountError(raw: string, submitted: boolean): string | null {
   const trimmed = raw.trim();
   if (trimmed === "") return submitted ? "Enter a max discount." : null;
@@ -149,7 +178,6 @@ export function CreateSamity() {
   const [txHash, setTxHash] = useState<`0x${string}` | null>(null);
   const [deployedAddress, setDeployedAddress] = useState<Address | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [showToast, setShowToast] = useState(false);
 
   const trimmedToken = token.trim();
   const tokenIsAddress = isAddress(trimmedToken);
@@ -176,9 +204,9 @@ export function CreateSamity() {
     query: { enabled: canRead && hasCode },
   });
 
-  const tokenName = readString(metaQuery.data?.[0]);
-  const tokenSymbol = readString(metaQuery.data?.[1]);
-  const decimals = readDecimals(metaQuery.data?.[2]);
+  const tokenName = canRead && hasCode ? readString(metaQuery.data?.[0]) : undefined;
+  const tokenSymbol = canRead && hasCode ? readString(metaQuery.data?.[1]) : undefined;
+  const decimals = canRead && hasCode ? readDecimals(metaQuery.data?.[2]) : undefined;
   const metaReady = tokenName != null && tokenSymbol != null && decimals != null;
 
   const balanceQuery = useReadContract({
@@ -233,15 +261,19 @@ export function CreateSamity() {
   const busy = phase === "confirm" || phase === "deploying";
   const txUrl = txHash != null && chainId != null ? txExplorerUrl(chainId, txHash) : null;
   const balanceText =
-    decimals != null && balanceQuery.data != null
+    canRead && metaReady && decimals != null && balanceQuery.data != null
       ? `${formatUnits(balanceQuery.data, decimals)}${tokenSymbol ? ` ${tokenSymbol}` : ""}`
       : null;
 
-  useEffect(() => {
-    if (!showToast) return;
-    const timeout = window.setTimeout(() => setShowToast(false), 8000);
-    return () => window.clearTimeout(timeout);
-  }, [showToast]);
+  const memberCount = quietMembers(fields.members);
+  const discountBps = quietBps(fields.maxDiscountCap);
+  const installmentBase = decimals == null ? null : quietAmount(fields.installment, decimals);
+  const collateralBase = decimals == null ? null : quietAmount(fields.collateral, decimals);
+  const poolPerRound = installmentBase != null && memberCount != null ? installmentBase * memberCount : null;
+  const obligation = installmentBase != null && memberCount != null ? installmentBase * memberCount : null;
+  const maxDiscountTokens =
+    poolPerRound != null && discountBps != null ? (poolPerRound * discountBps) / BigInt(MAX_DISCOUNT_BPS) : null;
+  const summaryLoading = canRead && readingToken;
 
   function setField(field: Field, value: string) {
     setFields((current) => ({ ...current, [field]: value }));
@@ -274,7 +306,6 @@ export function CreateSamity() {
 
     setTxHash(null);
     setDeployedAddress(null);
-    setShowToast(false);
 
     try {
       const response = await fetch("/api/samity-bytecode");
@@ -292,21 +323,26 @@ export function CreateSamity() {
       });
       setTxHash(hash);
       setPhase("deploying");
-      const receipt = await publicClient.waitForTransactionReceipt({ hash });
-      if (receipt.status !== "success" || !receipt.contractAddress) {
-        throw new Error("The deployment transaction failed.");
+      const receipt = await waitForSuccess(publicClient, hash);
+      if (!receipt.contractAddress) {
+        throw new Error("The deployment transaction did not return a contract address.");
       }
       setDeployedAddress(receipt.contractAddress);
       setPhase("done");
-      setShowToast(true);
+      pushToast("Samity deployed.", "ok");
     } catch (caught) {
       setPhase("idle");
-      setError(errorText(caught));
+      const message = errorText(caught);
+      setError(message);
+      pushToast(message, "err");
     }
   }
 
   return (
-    <section className="flex flex-col gap-4 rounded-2xl samity-card border border-emerald-200/70 bg-emerald-950/40 p-5">
+    <section
+      id="create-samity"
+      className="flex scroll-mt-8 flex-col gap-4 rounded-2xl samity-card border border-emerald-200/70 bg-emerald-950/40 p-5"
+    >
       <header className="flex flex-col gap-1">
         <h2 className="text-lg font-semibold">Create a new samity</h2>
         <p className="text-sm text-emerald-50/70">
@@ -330,16 +366,27 @@ export function CreateSamity() {
         {metaReady ? (
           <span className="text-sm text-emerald-50/80">
             {tokenName} · {tokenSymbol} · {decimals} decimals
-            {balanceQuery.isLoading ? " · Balance loading…" : balanceText ? ` · Balance ${balanceText}` : null}
+            {balanceQuery.isLoading ? (
+              <>
+                {" · Balance "}
+                <Skeleton className="inline-block h-3 w-16 align-middle" />
+              </>
+            ) : balanceText ? (
+              ` · Balance ${balanceText}`
+            ) : null}
           </span>
         ) : null}
         {metaReady && balanceQuery.isError ? (
           <span className="text-sm text-red-300">Could not read your balance. {errorText(balanceQuery.error)}</span>
         ) : null}
-        {canRead && readingToken ? <span className="text-sm text-emerald-50/70">Reading token from the chain…</span> : null}
+        {canRead && readingToken ? (
+          <span aria-busy="true">
+            <Skeleton className="inline-block h-4 w-56" />
+          </span>
+        ) : null}
       </label>
 
-      <div className="grid gap-3 sm:grid-cols-2">
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
         <TextField
           label="Installment"
           value={fields.installment}
@@ -390,7 +437,7 @@ export function CreateSamity() {
               key={mode}
               type="button"
               aria-pressed={durationMode === mode}
-              className={`rounded-lg border px-3 py-2 ${durationMode === mode ? "border-emerald-300 bg-emerald-400/20" : "border-emerald-200/20 bg-black/30"}`}
+              className={`w-full rounded-lg border px-3 py-2 ${durationMode === mode ? "border-emerald-300 bg-emerald-400/20" : "border-emerald-200/20 bg-black/30"}`}
               onClick={() => setDurationMode(mode)}
             >
               {label}
@@ -411,9 +458,31 @@ export function CreateSamity() {
         ) : null}
       </fieldset>
 
+      <div
+        className="grid grid-cols-1 gap-3 rounded-xl border border-emerald-200/20 bg-black/20 p-4 sm:grid-cols-2"
+        aria-busy={summaryLoading}
+      >
+        <SummaryStat label="Pool per round" value={tokenText(poolPerRound, decimals, tokenSymbol)} loading={summaryLoading} />
+        <SummaryStat
+          label="Total obligation per member"
+          value={tokenText(obligation, decimals, tokenSymbol)}
+          loading={summaryLoading}
+        />
+        <SummaryStat label="Collateral" value={tokenText(collateralBase, decimals, tokenSymbol)} loading={summaryLoading} />
+        <SummaryStat
+          label="Max discount"
+          value={tokenText(maxDiscountTokens, decimals, tokenSymbol)}
+          loading={summaryLoading}
+        />
+      </div>
+      <p className="text-xs text-emerald-50/60">
+        Pool per round is the installment times the member count. Total obligation is the installment times the cycles.
+        Max discount is that basis-point share of the pool. Amounts use this token&apos;s decimals and symbol.
+      </p>
+
       <button
         type="button"
-        className="rounded-lg bg-emerald-400 px-4 py-2 text-sm font-semibold text-emerald-950 disabled:opacity-40"
+        className="w-full rounded-lg bg-emerald-400 px-4 py-2 text-sm font-semibold text-emerald-950 disabled:opacity-40"
         disabled={blockReason != null || busy}
         onClick={() => {
           void deploy();
@@ -446,21 +515,16 @@ export function CreateSamity() {
         </Link>
       ) : null}
       {error ? <p className="text-sm text-red-300">{error}</p> : null}
-
-      {showToast ? (
-        <div
-          role="status"
-          className="fixed bottom-4 left-1/2 z-50 w-[min(24rem,calc(100%-2rem))] -translate-x-1/2 rounded-lg bg-emerald-400 px-4 py-3 text-sm font-semibold text-emerald-950"
-        >
-          Samity deployed.
-          {txUrl ? (
-            <a className="mt-1 block font-mono text-xs underline" href={txUrl} target="_blank" rel="noreferrer">
-              View transaction
-            </a>
-          ) : null}
-        </div>
-      ) : null}
     </section>
+  );
+}
+
+function SummaryStat({ label, value, loading }: { label: string; value: string; loading: boolean }) {
+  return (
+    <div className="flex flex-col gap-1">
+      <p className="text-emerald-50/60">{label}</p>
+      {loading ? <Skeleton className="inline-block h-4 w-28" /> : <p className="break-all font-mono text-xs">{value}</p>}
+    </div>
   );
 }
 

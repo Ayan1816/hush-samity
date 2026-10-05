@@ -14,9 +14,12 @@ import {
 } from "wagmi";
 import { MyBid } from "@/src/components/MyBid";
 import { SealBid } from "@/src/components/SealBid";
+import { Skeleton } from "@/src/components/Skeleton";
+import { pushToast } from "@/src/components/Toast";
 import { bidEngineAbi, collateralAbi, erc20Abi, phaseName, samityAbi } from "@/src/lib/abis";
 import { isSupportedChainId } from "@/src/config/cofhe";
 import { errorText } from "@/src/lib/errors";
+import { waitForSuccess } from "@/src/lib/receipt";
 
 type ReadRow = {
   status: "success" | "failure";
@@ -207,15 +210,22 @@ export function SamityDesk({ samity }: { samity: Address }) {
         </p>
       </header>
 
-      {!ready ? null : codeQuery.isPending ? (
-        <p className="text-sm text-emerald-50/70">Reading contract code…</p>
+      {!ready ? null : codeQuery.isLoading ? (
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2" aria-busy="true">
+          {["code-a", "code-b", "code-c", "code-d"].map((key) => (
+            <div key={key} className="flex flex-col gap-2">
+              <Skeleton className="inline-block h-3 w-20" />
+              <Skeleton className="inline-block h-4 w-32" />
+            </div>
+          ))}
+        </div>
       ) : codeQuery.isError ? (
         <p className="text-sm text-red-300">{errorText(codeQuery.error)}</p>
       ) : !hasCode ? (
         <p className="text-sm text-emerald-50/70">No contract code at this address on {chain?.name}.</p>
       ) : (
         <>
-          <div className="grid gap-3 rounded-2xl samity-card border border-emerald-200/70 bg-emerald-950/40 p-5 text-sm sm:grid-cols-2">
+          <div className="grid grid-cols-1 gap-3 rounded-2xl samity-card border border-emerald-200/70 bg-emerald-950/40 p-5 text-sm sm:grid-cols-2">
             <Stat
               label="Round"
               value={
@@ -368,13 +378,23 @@ export function SamityDesk({ samity }: { samity: Address }) {
             <section className="flex flex-col gap-4">
               <p className="break-all text-sm text-emerald-50/70">
                 BidEngine {bidEngine}. canBid:{" "}
-                {address == null ? "connect a wallet" : failure(userRows?.[5]) ?? (canBid == null ? "reading" : String(canBid))}
+                {address == null ? (
+                  "connect a wallet"
+                ) : failure(userRows?.[5]) ? (
+                  failure(userRows?.[5])
+                ) : canBid == null ? (
+                  <Skeleton className="inline-block h-3 w-16 align-middle" />
+                ) : (
+                  String(canBid)
+                )}
               </p>
               <SealedBidSubmit bidEngine={bidEngine} chainId={chainId} onDone={reload} />
               <MyBid bidEngineAddress={bidEngine} />
             </section>
+          ) : blockNumber == null || publicQuery.isLoading ? (
+            <Skeleton className="inline-block h-4 w-40" />
           ) : (
-            <p className="text-sm text-emerald-50/70">{failure(rows?.[5]) ?? "Reading BidEngine."}</p>
+            <p className="text-sm text-emerald-50/70">{failure(rows?.[5]) ?? "BidEngine is unavailable."}</p>
           )}
         </>
       )}
@@ -386,7 +406,11 @@ function Stat({ label, value }: { label: string; value: string }) {
   return (
     <div className="flex flex-col gap-1">
       <p className="text-emerald-50/60">{label}</p>
-      <p className="break-all font-mono text-xs">{value}</p>
+      {value === "Reading…" ? (
+        <Skeleton className="inline-block h-4 w-28" />
+      ) : (
+        <p className="break-all font-mono text-xs">{value}</p>
+      )}
     </div>
   );
 }
@@ -426,6 +450,8 @@ function PullAndCall({
   const [error, setError] = useState<string | null>(null);
   const allowance = allowanceQuery.data;
   const needsApproval = allowance != null && allowance < amount;
+  const doneText =
+    functionName === "join" ? "Joined the samity." : functionName === "lockCollateral" ? "Collateral locked." : "Installment paid.";
 
   async function run() {
     if (!address || !publicClient) {
@@ -450,7 +476,8 @@ function PullAndCall({
         });
         setHash(approveHash);
         setStatus("Waiting for the approval.");
-        await publicClient.waitForTransactionReceipt({ hash: approveHash });
+        await waitForSuccess(publicClient, approveHash);
+        pushToast("Token approval confirmed.", "ok");
         await allowanceQuery.refetch();
       }
       setStatus("Confirm the samity transaction.");
@@ -462,12 +489,15 @@ function PullAndCall({
       });
       setHash(txHash);
       setStatus("Waiting for the samity transaction.");
-      await publicClient.waitForTransactionReceipt({ hash: txHash });
+      await waitForSuccess(publicClient, txHash);
       setStatus("Transaction confirmed.");
+      pushToast(doneText, "ok");
       onDone();
     } catch (caught) {
       setStatus(null);
-      setError(errorText(caught));
+      const message = errorText(caught);
+      setError(message);
+      pushToast(message, "err");
     }
   }
 
@@ -475,12 +505,21 @@ function PullAndCall({
     <div className="flex flex-col gap-2 rounded-2xl samity-card border border-emerald-200/70 bg-emerald-950/40 p-5 text-sm">
       <p className="font-semibold">{label}</p>
       <p className="text-emerald-50/70">
-        Allowance: {allowanceQuery.isError ? errorText(allowanceQuery.error) : allowance == null ? "Reading…" : allowance.toString()} base units.
-        Required: {amount.toString()} base units.
+        Allowance:{" "}
+        {allowanceQuery.isError ? (
+          errorText(allowanceQuery.error)
+        ) : allowanceQuery.isLoading ? (
+          <Skeleton className="inline-block h-3 w-24 align-middle" />
+        ) : allowance == null ? (
+          "Waiting for the allowance."
+        ) : (
+          `${allowance.toString()} base units`
+        )}
+        . Required: {amount.toString()} base units.
       </p>
       <button
         type="button"
-        className="rounded-lg bg-emerald-400 px-4 py-2 text-sm font-semibold text-emerald-950 disabled:opacity-40"
+        className="w-full rounded-lg bg-emerald-400 px-4 py-2 text-sm font-semibold text-emerald-950 disabled:opacity-40"
         disabled={status != null || allowance == null}
         onClick={() => {
           void run();
@@ -531,12 +570,15 @@ function CloseCycle({
       });
       setHash(txHash);
       setStatus("Waiting for closeCycle.");
-      await publicClient.waitForTransactionReceipt({ hash: txHash });
+      await waitForSuccess(publicClient, txHash);
       setStatus("Cycle closed.");
+      pushToast("Cycle closed.", "ok");
       onDone();
     } catch (caught) {
       setStatus(null);
-      setError(errorText(caught));
+      const message = errorText(caught);
+      setError(message);
+      pushToast(message, "err");
     }
   }
 
@@ -552,7 +594,7 @@ function CloseCycle({
       </p>
       <button
         type="button"
-        className="rounded-lg bg-emerald-400 px-4 py-2 text-sm font-semibold text-emerald-950 disabled:opacity-40"
+        className="w-full rounded-lg bg-emerald-400 px-4 py-2 text-sm font-semibold text-emerald-950 disabled:opacity-40"
         disabled={!windowClosed || isPending || status != null}
         onClick={() => {
           void close();
@@ -596,12 +638,15 @@ function SealedBidSubmit({
       });
       setHash(txHash);
       setStatus("Waiting for submitBid.");
-      await client.waitForTransactionReceipt({ hash: txHash });
+      await waitForSuccess(client, txHash);
       setStatus("Bid submitted.");
+      pushToast("Bid submitted.", "ok");
       onDone();
     } catch (caught) {
       setStatus(null);
-      setError(errorText(caught));
+      const message = errorText(caught);
+      setError(message);
+      pushToast(message, "err");
     }
   }
 

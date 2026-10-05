@@ -4,6 +4,7 @@ import { FheTypes, isCofheError } from "@cofhe/sdk";
 import { useState } from "react";
 import { isAddress, zeroHash } from "viem";
 import { useAccount, usePublicClient, useReadContract, useWalletClient } from "wagmi";
+import { Skeleton } from "@/src/components/Skeleton";
 import { connectCofheClient, cofheClient, isSupportedChainId } from "@/src/config/cofhe";
 
 const bidEngineReads = [
@@ -102,15 +103,17 @@ export function MyBid({ bidEngineAddress }: MyBidProps) {
         <div>
           <dt className="text-emerald-50/60">Bid handle</dt>
           <dd className="break-all font-mono text-xs">
-            {!isConnected
-              ? "Connect a wallet."
-              : bidQuery.isLoading
-                ? "Reading BidEngine.myBid…"
-                : bidQuery.error
-                  ? errorText(bidQuery.error)
-                  : handleReady
-                    ? handle
-                    : "BidEngine returned an empty handle."}
+            {!isConnected ? (
+              "Connect a wallet."
+            ) : bidQuery.isLoading ? (
+              <Skeleton className="inline-block h-3 w-40 align-middle" />
+            ) : bidQuery.error ? (
+              errorText(bidQuery.error)
+            ) : handleReady ? (
+              handle
+            ) : (
+              "BidEngine returned an empty handle."
+            )}
           </dd>
         </div>
         <div className="flex justify-between gap-4">
@@ -121,7 +124,7 @@ export function MyBid({ bidEngineAddress }: MyBidProps) {
 
       <button
         type="button"
-        className="rounded-lg bg-emerald-400 px-4 py-2 text-sm font-semibold text-emerald-950 disabled:opacity-40"
+        className="w-full rounded-lg bg-emerald-400 px-4 py-2 text-sm font-semibold text-emerald-950 disabled:opacity-40"
         onClick={() => {
           void decryptMine();
         }}
