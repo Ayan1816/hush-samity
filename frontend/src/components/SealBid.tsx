@@ -205,6 +205,7 @@ export function SealBid({ bidEngineAddress, onSealed }: SealBidProps) {
           className="rounded-lg border border-emerald-200/20 bg-black/30 px-3 py-2 font-mono"
           inputMode="numeric"
           autoComplete="off"
+          placeholder="500"
           value={basisPoints}
           onChange={(event) => setBasisPoints(event.target.value)}
           disabled={sealing}

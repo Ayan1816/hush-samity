@@ -31,6 +31,7 @@ export function JoinSamity() {
           className="rounded-lg border border-emerald-200/20 bg-black/30 px-3 py-2 font-mono"
           autoComplete="off"
           spellCheck={false}
+          placeholder="0x..."
           value={value}
           onChange={(event) => setValue(event.target.value)}
         />
