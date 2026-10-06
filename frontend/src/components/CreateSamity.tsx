@@ -1,8 +1,9 @@
 "use client";
 
 import Link from "next/link";
+import { useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
-import { formatUnits, isAddress, parseUnits, zeroAddress, type Address } from "viem";
+import { formatUnits, getAddress, isAddress, parseUnits, zeroAddress, type Address } from "viem";
 import { useAccount, useBytecode, useDeployContract, usePublicClient, useReadContract, useReadContracts } from "wagmi";
 import { wagmiConfig } from "@/lib/wagmi";
 import { Skeleton } from "@/src/components/Skeleton";
@@ -10,11 +11,13 @@ import { pushToast } from "@/src/components/Toast";
 import { erc20Abi, samityAbi } from "@/src/lib/abis";
 import { isSupportedChainId } from "@/src/config/cofhe";
 import { errorText } from "@/src/lib/errors";
+import { mySamitiesQueryKey, rememberDeployedSamity } from "@/src/lib/mySamities";
 import { waitForSuccess } from "@/src/lib/receipt";
 
 const MAX_DISCOUNT_BPS = 10_000;
 const WEEK_SECONDS = 7 * 24 * 60 * 60;
 const MONTH_SECONDS = 30 * 24 * 60 * 60;
+const TEST_TUSD = "0xafe683fa48d0823772bb290b31720918e5613adc";
 
 type Field = "installment" | "collateral" | "members" | "customDuration" | "maxDiscountCap";
 type DurationMode = "weekly" | "monthly" | "custom";
@@ -166,6 +169,7 @@ function stepMark(phase: DeployPhase, id: (typeof DEPLOY_STEPS)[number]["id"]): 
 }
 
 export function CreateSamity() {
+  const queryClient = useQueryClient();
   const { address, chainId, isConnected } = useAccount();
   const publicClient = usePublicClient();
   const { deployContractAsync } = useDeployContract();
@@ -256,7 +260,13 @@ export function CreateSamity() {
   else if (tokenAddress == null) blockReason = "Enter token address";
   else if (readingToken) blockReason = "Reading token from the chain…";
   else if (tokenFormatError) blockReason = tokenFormatError;
-  else if (!metaReady) blockReason = "This address is not an ERC-20 contract.";
+  else if (!metaReady || decimals == null) blockReason = "This address is not an ERC-20 contract.";
+  else
+    blockReason =
+      amountError("Installment", fields.installment, decimals, true) ??
+      amountError("Collateral", fields.collateral, decimals, true) ??
+      membersError(fields.members, true) ??
+      discountError(fields.maxDiscountCap, true);
 
   const busy = phase === "confirm" || phase === "deploying";
   const txUrl = txHash != null && chainId != null ? txExplorerUrl(chainId, txHash) : null;
@@ -329,6 +339,24 @@ export function CreateSamity() {
       }
       setDeployedAddress(receipt.contractAddress);
       setPhase("done");
+      if (chainId != null) {
+        const saved = rememberDeployedSamity({
+          chainId,
+          account: address,
+          blockNumber: receipt.blockNumber,
+          row: {
+            address: receipt.contractAddress,
+            role: "Creator",
+            creator: address,
+            token: getAddress(tokenAddress),
+            installmentAmount: installment,
+            memberCap: members,
+            decimals,
+            symbol: tokenSymbol ?? null,
+          },
+        });
+        queryClient.setQueryData(mySamitiesQueryKey(chainId, address), saved);
+      }
       pushToast("Samity deployed.", "ok");
     } catch (caught) {
       setPhase("idle");
@@ -352,16 +380,29 @@ export function CreateSamity() {
       </header>
 
       <label className="flex flex-col gap-2 text-sm">
-        Contribution ERC-20
+        <span className="flex items-baseline justify-between gap-3">
+          <span>Contribution ERC-20</span>
+          <button
+            type="button"
+            className="text-xs font-medium text-emerald-200 underline-offset-2 hover:underline"
+            onClick={() => setToken(TEST_TUSD)}
+          >
+            Autofill Test TUSD
+          </button>
+        </span>
         <input
           className={`${inputClass} ${tokenFormatError ? "border-red-400" : "border-emerald-200/20"}`}
           autoComplete="off"
           spellCheck={false}
           placeholder="0x..."
           aria-invalid={tokenFormatError ? true : undefined}
+          aria-describedby="contribution-token-help"
           value={token}
           onChange={(event) => setToken(event.target.value)}
         />
+        <span id="contribution-token-help" className="text-xs text-emerald-50/60">
+          Enter the token contract address. Ask your community admin for the specific address.
+        </span>
         {tokenFormatError ? <span className="text-sm text-red-300">{tokenFormatError}</span> : null}
         {metaReady ? (
           <span className="text-sm text-emerald-50/80">
@@ -552,19 +593,19 @@ function TextField({
 }) {
   return (
     <label className="flex flex-col gap-2 text-sm">
-      <span className="flex items-baseline justify-between gap-3">
-        <span>{label}</span>
-        {hint ? <span className="text-emerald-50/70">{hint}</span> : null}
+      <span>{label}</span>
+      <span className="flex flex-wrap items-center gap-2">
+        <input
+          className={`${inputClass} min-w-0 flex-1 ${error ? "border-red-400" : "border-emerald-200/20"}`}
+          inputMode={inputMode}
+          autoComplete="off"
+          placeholder={placeholder}
+          aria-invalid={error ? true : undefined}
+          value={value}
+          onChange={(event) => onChange(event.target.value)}
+        />
+        {hint ? <span className="text-xs text-emerald-100">{hint}</span> : null}
       </span>
-      <input
-        className={`${inputClass} ${error ? "border-red-400" : "border-emerald-200/20"}`}
-        inputMode={inputMode}
-        autoComplete="off"
-        placeholder={placeholder}
-        aria-invalid={error ? true : undefined}
-        value={value}
-        onChange={(event) => onChange(event.target.value)}
-      />
       {detail ? <span className="text-xs text-emerald-50/60">{detail}</span> : null}
       {error ? <span className="text-sm text-red-300">{error}</span> : null}
     </label>
