@@ -1,3 +1,3 @@
 "use client";
 
-export { default } from "@/src/app/samity/[address]/page";
+export { default } from "@/src/screens/SamityPage";
