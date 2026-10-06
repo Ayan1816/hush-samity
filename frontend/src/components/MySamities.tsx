@@ -24,6 +24,7 @@ export function MySamities() {
   const scan = useQuery({
     queryKey: ["my-samities", chainId ?? null, address ?? null],
     enabled,
+    retry: false,
     staleTime: 30_000,
     refetchOnWindowFocus: false,
     queryFn: () => {
@@ -45,7 +46,7 @@ export function MySamities() {
       {!isConnected ? <p className="text-sm text-emerald-50/70">Connect wallet first</p> : null}
       {isConnected && !supported ? <p className="text-sm text-emerald-50/70">Switch to Sepolia</p> : null}
 
-      {enabled && scan.isLoading ? (
+      {enabled && scan.isLoading && !scan.isError ? (
         <div className="flex flex-col gap-3" aria-busy="true">
           <Skeleton className="block h-16 w-full" />
           <Skeleton className="block h-16 w-full" />
@@ -54,6 +55,7 @@ export function MySamities() {
 
       {enabled && scan.isError ? (
         <div className="flex flex-col gap-3">
+          <p className="text-sm text-emerald-50">No samities found.</p>
           <p className="text-sm text-red-300">{errorText(scan.error)}</p>
           <button
             type="button"
@@ -77,7 +79,7 @@ export function MySamities() {
           ) : null}
           {scan.data.rows.length === 0 ? (
             <div className="flex flex-col gap-3">
-              <p className="text-sm text-emerald-50/70">No samities for this wallet in the scanned blocks.</p>
+              <p className="text-sm text-emerald-50">No samities found.</p>
               <Link
                 href="#create-samity"
                 className="w-full rounded-lg bg-emerald-400 px-4 py-2 text-center text-sm font-semibold text-emerald-950"

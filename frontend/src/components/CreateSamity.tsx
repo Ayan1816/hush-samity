@@ -482,15 +482,18 @@ export function CreateSamity() {
 
       <button
         type="button"
-        className="w-full rounded-lg bg-emerald-400 px-4 py-2 text-sm font-semibold text-emerald-950 disabled:opacity-40"
+        className={`w-full rounded-lg px-4 py-2 text-sm font-semibold ${
+          blockReason != null || busy
+            ? "cursor-not-allowed bg-emerald-950 text-emerald-50 ring-1 ring-emerald-200/50"
+            : "bg-emerald-400 text-emerald-950"
+        }`}
         disabled={blockReason != null || busy}
         onClick={() => {
           void deploy();
         }}
       >
-        {phase === "confirm" ? "Confirm in wallet" : phase === "deploying" ? "Deploying" : "Deploy samity"}
+        {phase === "confirm" ? "Confirm in wallet" : phase === "deploying" ? "Deploying" : (blockReason ?? "Deploy samity")}
       </button>
-      {phase === "idle" && blockReason ? <p className="text-sm text-emerald-50/70">{blockReason}</p> : null}
 
       {phase !== "idle" ? (
         <ol className="flex flex-col gap-1 text-sm">
@@ -522,7 +525,7 @@ export function CreateSamity() {
 function SummaryStat({ label, value, loading }: { label: string; value: string; loading: boolean }) {
   return (
     <div className="flex flex-col gap-1">
-      <p className="text-emerald-50/60">{label}</p>
+      <p className="text-xs text-emerald-50/60">{label}</p>
       {loading ? <Skeleton className="inline-block h-4 w-28" /> : <p className="break-all font-mono text-xs">{value}</p>}
     </div>
   );
@@ -553,7 +556,6 @@ function TextField({
         <span>{label}</span>
         {hint ? <span className="text-emerald-50/70">{hint}</span> : null}
       </span>
-      {detail ? <span className="text-emerald-50/60">{detail}</span> : null}
       <input
         className={`${inputClass} ${error ? "border-red-400" : "border-emerald-200/20"}`}
         inputMode={inputMode}
@@ -563,6 +565,7 @@ function TextField({
         value={value}
         onChange={(event) => onChange(event.target.value)}
       />
+      {detail ? <span className="text-xs text-emerald-50/60">{detail}</span> : null}
       {error ? <span className="text-sm text-red-300">{error}</span> : null}
     </label>
   );

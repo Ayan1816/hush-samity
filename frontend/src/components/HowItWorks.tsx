@@ -1,7 +1,9 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { cofheClient } from "@/src/config/cofhe";
+import { useAccount, usePublicClient, useWalletClient } from "wagmi";
+import { cofheClient, connectCofheClient, isSupportedChainId } from "@/src/config/cofhe";
+import { errorText } from "@/src/lib/errors";
 
 type CofheStatus = "Initialized" | "Connecting" | "Not initialized";
 
@@ -20,25 +22,56 @@ const STEPS = [
   },
 ] as const;
 
-function statusFrom(snapshot: { connected: boolean; connecting: boolean }): CofheStatus {
+type ConnectionSnapshot = {
+  connected: boolean;
+  connecting: boolean;
+  connectError?: unknown;
+};
+
+function statusFrom(snapshot: ConnectionSnapshot): CofheStatus {
   if (snapshot.connected) return "Initialized";
   if (snapshot.connecting) return "Connecting";
   return "Not initialized";
 }
 
 export function HowItWorks() {
+  const { isConnected, chainId } = useAccount();
+  const supported = isSupportedChainId(chainId);
+  const publicClient = usePublicClient({ chainId: supported ? chainId : undefined });
+  const { data: walletClient } = useWalletClient({ chainId: supported ? chainId : undefined });
   const [status, setStatus] = useState<CofheStatus>("Not initialized");
+  const [connectError, setConnectError] = useState<string | null>(null);
+  const [manualPending, setManualPending] = useState(false);
 
   useEffect(() => {
-    const apply = (snapshot: { connected: boolean; connecting: boolean }) => {
+    const apply = (snapshot: ConnectionSnapshot) => {
       setStatus(statusFrom(snapshot));
+      setConnectError(snapshot.connectError ? errorText(snapshot.connectError) : null);
     };
     apply(cofheClient.getSnapshot());
     return cofheClient.subscribe(apply);
   }, []);
 
+  async function initialize() {
+    if (!publicClient || !walletClient) {
+      setConnectError("The wallet provider is not ready yet.");
+      return;
+    }
+    setManualPending(true);
+    setConnectError(null);
+    try {
+      await connectCofheClient(publicClient, walletClient);
+    } catch (caught) {
+      setConnectError(errorText(caught));
+    } finally {
+      setManualPending(false);
+    }
+  }
+
   const dot =
     status === "Initialized" ? "bg-emerald-400" : status === "Connecting" ? "animate-pulse bg-amber-300" : "bg-emerald-50/40";
+  const needsAction = connectError != null || publicClient == null || walletClient == null;
+  const showInitialize = isConnected && supported && status === "Not initialized" && !manualPending && needsAction;
 
   return (
     <section className="flex flex-col gap-4 rounded-2xl samity-card border border-emerald-200/70 bg-emerald-950/40 p-5">
@@ -51,8 +84,20 @@ export function HowItWorks() {
         </div>
         <p className="inline-flex items-center gap-2 text-xs text-emerald-50/80">
           <span className={`h-2 w-2 rounded-full ${dot}`} aria-hidden="true" />
-          CoFHE client: {status}
+          CoFHE client: {manualPending ? "Connecting" : status}
         </p>
+        {showInitialize ? (
+          <button
+            type="button"
+            className="w-full rounded-lg bg-emerald-400 px-4 py-2 text-sm font-semibold text-emerald-950"
+            onClick={() => {
+              void initialize();
+            }}
+          >
+            Initialize CoFHE
+          </button>
+        ) : null}
+        {connectError && status !== "Initialized" ? <p className="text-sm text-red-300">{connectError}</p> : null}
       </header>
       <ol className="grid grid-cols-1 gap-3 sm:grid-cols-3">
         {STEPS.map((step, index) => (

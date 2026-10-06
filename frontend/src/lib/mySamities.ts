@@ -54,7 +54,27 @@ function messages(error: unknown, depth = 0): string[] {
   return found;
 }
 
+const RATE_LIMIT_MESSAGE = "The RPC rate limit was reached. No samities could be loaded.";
+
+function isRateLimitError(error: unknown): boolean {
+  if (error instanceof Error && error.message === RATE_LIMIT_MESSAGE) return true;
+  const text = messages(error).join("\n").toLowerCase();
+  return (
+    text.includes("exceeds defined limit") ||
+    text.includes("rate limit") ||
+    text.includes("too many requests") ||
+    text.includes("429")
+  );
+}
+
+function rateLimitError(error: unknown): Error | null {
+  if (!isRateLimitError(error)) return null;
+  if (error instanceof Error && error.message === RATE_LIMIT_MESSAGE) return error;
+  return new Error(RATE_LIMIT_MESSAGE);
+}
+
 function isRangeError(error: unknown): boolean {
+  if (isRateLimitError(error)) return false;
   const text = messages(error).join("\n").toLowerCase();
   return [
     "block range",
@@ -143,10 +163,18 @@ async function collectChunk(
   try {
     await collect(client, account, fromBlock, toBlock, joined, opened);
   } catch (error) {
+    const limited = rateLimitError(error);
+    if (limited) throw limited;
     if (!isRangeError(error) || toBlock - fromBlock < SMALL_CHUNK) throw error;
     for (let start = fromBlock; start <= toBlock; start += SMALL_CHUNK) {
       const end = start + SMALL_CHUNK - 1n > toBlock ? toBlock : start + SMALL_CHUNK - 1n;
-      await collect(client, account, start, end, joined, opened);
+      try {
+        await collect(client, account, start, end, joined, opened);
+      } catch (inner) {
+        const innerLimit = rateLimitError(inner);
+        if (innerLimit) throw innerLimit;
+        throw inner;
+      }
     }
   }
 }
@@ -222,6 +250,8 @@ export async function loadMySamities(client: LogClient, account: Address): Promi
   try {
     await collect(client, account, 0n, latest, joined, opened);
   } catch (error) {
+    const limitedByRpc = rateLimitError(error);
+    if (limitedByRpc) throw limitedByRpc;
     if (!isRangeError(error)) throw error;
     limited = true;
     joined.clear();
@@ -229,7 +259,13 @@ export async function loadMySamities(client: LogClient, account: Address): Promi
     fromBlock = latest > WINDOW ? latest - WINDOW : 0n;
     for (let start = fromBlock; start <= latest; start += CHUNK) {
       const end = start + CHUNK - 1n > latest ? latest : start + CHUNK - 1n;
-      await collectChunk(client, account, start, end, joined, opened);
+      try {
+        await collectChunk(client, account, start, end, joined, opened);
+      } catch (chunkError) {
+        const chunkLimit = rateLimitError(chunkError);
+        if (chunkLimit) throw chunkLimit;
+        throw chunkError;
+      }
     }
   }
 

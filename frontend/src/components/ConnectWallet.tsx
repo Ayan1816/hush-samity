@@ -11,6 +11,18 @@ function shortAddress(address: string): string {
   return `${address.slice(0, 6)}…${address.slice(-4)}`;
 }
 
+function formatBalance(value: bigint, decimals: number, symbol: string): string {
+  const raw = formatUnits(value, decimals);
+  const negative = raw.startsWith("-");
+  const unsigned = negative ? raw.slice(1) : raw;
+  const dot = unsigned.indexOf(".");
+  if (dot === -1) return `${raw} ${symbol}`;
+  const whole = unsigned.slice(0, dot);
+  const fraction = unsigned.slice(dot + 1, dot + 5).replace(/0+$/, "");
+  const amount = fraction.length > 0 ? `${whole}.${fraction}` : whole;
+  return `${negative ? "-" : ""}${amount} ${symbol}`;
+}
+
 export function ConnectWallet() {
   const [mounted, setMounted] = useState(false);
   const [walletOpen, setWalletOpen] = useState(false);
@@ -54,7 +66,7 @@ export function ConnectWallet() {
   const wrongNetwork = Boolean(isConnected && !isSupportedChainId(chain?.id));
   const switchTarget = wagmiConfig.chains[0];
   const balanceText =
-    balance == null ? "Balance loading…" : `${formatUnits(balance.value, balance.decimals)} ${balance.symbol}`;
+    balance == null ? "Balance loading…" : formatBalance(balance.value, balance.decimals, balance.symbol);
 
   return (
     <div className="flex w-full flex-col gap-2 text-sm sm:w-72">
