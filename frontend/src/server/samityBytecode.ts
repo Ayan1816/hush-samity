@@ -1,10 +1,7 @@
 import { NextResponse } from "next/server";
-import samityArtifact from "../../../artifacts/contracts/Samity.sol/Samity.json";
+import { abi, bytecode } from "@/src/lib/samityArtifact";
 
-/**
- * Static import so Next bundles the Hardhat artifact into the server build.
- * Vercel serverless functions cannot scandir or read arbitrary files at runtime.
- */
+/** Bundled copy of the Samity artifact. Nothing is read from the gitignored artifacts directory. */
 export function GET() {
-  return NextResponse.json(samityArtifact);
+  return NextResponse.json({ abi, bytecode });
 }

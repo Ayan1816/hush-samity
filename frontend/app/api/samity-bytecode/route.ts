@@ -1,3 +1,8 @@
+import { NextResponse } from "next/server";
+import { abi, bytecode } from "@/src/lib/samityArtifact";
+
 export const runtime = "nodejs";
 
-export { GET } from "@/src/server/samityBytecode";
+export function GET() {
+  return NextResponse.json({ abi, bytecode });
+}
