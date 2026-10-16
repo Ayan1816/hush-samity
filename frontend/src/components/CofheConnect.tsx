@@ -38,11 +38,16 @@ export function CofheConnect() {
       startedFor.current = key;
       return;
     }
-    if (startedFor.current === key) return;
+    // `connect()` returns immediately when the wallet client object is unchanged,
+    // so an account switch has to drop the previous session or the proof stays bound to it.
+    if (startedFor.current === key && !(snapshot.connected && snapshot.account?.toLowerCase() !== address.toLowerCase())) {
+      return;
+    }
+    if (snapshot.connected || snapshot.connecting) cofheClient.disconnect();
 
     startedFor.current = key;
     void connectCofheClient(publicClient, walletClient).catch(() => {
-      // connect() records connectError on the snapshot before it throws.
+      if (startedFor.current === key) startedFor.current = null;
     });
   }, [address, chainId, isConnected, publicClient, status, supported, walletClient]);
 

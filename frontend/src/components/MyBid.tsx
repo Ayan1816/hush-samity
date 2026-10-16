@@ -6,24 +6,12 @@ import { isAddress, zeroHash } from "viem";
 import { useAccount, usePublicClient, useReadContract, useWalletClient } from "wagmi";
 import { Skeleton } from "@/src/components/Skeleton";
 import { connectCofheClient, cofheClient, isSupportedChainId } from "@/src/config/cofhe";
-
-const bidEngineReads = [
-  {
-    type: "function",
-    name: "myBid",
-    stateMutability: "view",
-    inputs: [],
-    outputs: [{ name: "", type: "bytes32" }],
-  },
-] as const;
+import { bidEngineAbi } from "@/src/lib/abis";
+import { errorText as revertText } from "@/src/lib/errors";
 
 function errorText(error: unknown): string {
   if (isCofheError(error)) return error.message;
-  if (typeof error === "object" && error !== null && "shortMessage" in error && typeof error.shortMessage === "string") {
-    return error.shortMessage;
-  }
-  if (error instanceof Error) return error.message;
-  return "Could not read the bid.";
+  return revertText(error);
 }
 
 export type MyBidProps = {
@@ -40,7 +28,7 @@ export function MyBid({ bidEngineAddress }: MyBidProps) {
 
   const bidQuery = useReadContract({
     address: bidEngineAddress,
-    abi: bidEngineReads,
+    abi: bidEngineAbi,
     functionName: "myBid",
     account: address,
     query: {

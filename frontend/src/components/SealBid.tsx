@@ -2,10 +2,11 @@
 
 import { EncryptStep, Encryptable, isCofheError, type EncryptStepCallbackContext } from "@cofhe/sdk";
 import { useState } from "react";
-import { isAddress } from "viem";
+import { getAddress, isAddress } from "viem";
 import { useAccount, usePublicClient, useReadContract, useWalletClient } from "wagmi";
 import { Skeleton } from "@/src/components/Skeleton";
 import { cofheClient, connectCofheClient, isSupportedChainId, supportedChains } from "@/src/config/cofhe";
+import { normalizeHandle, normalizeProof } from "@/src/lib/ciphertext";
 
 const ENCRYPT_STEPS = [
   EncryptStep.InitTfhe,
@@ -81,9 +82,11 @@ export type SealBidProps = {
    */
   bidEngineAddress: `0x${string}`;
   onSealed?: (sealed: SealedBid) => void;
+  /** Set when `submitBid` would revert. Sealing stays disabled. */
+  disabledReason?: string | null;
 };
 
-export function SealBid({ bidEngineAddress, onSealed }: SealBidProps) {
+export function SealBid({ bidEngineAddress, onSealed, disabledReason = null }: SealBidProps) {
   const { address, chainId, isConnected } = useAccount();
   const publicClient = usePublicClient();
   const { data: walletClient } = useWalletClient();
@@ -107,11 +110,15 @@ export function SealBid({ bidEngineAddress, onSealed }: SealBidProps) {
   const canSeal = isConnected && chainSupported && engineReady && publicClient != null && walletClient != null && !sealing;
 
   async function sealBid() {
-    if (!publicClient || !walletClient) {
-      setError("Connect a wallet on a supported chain before sealing a bid.");
+    if (disabledReason) {
+      setError(disabledReason);
       return;
     }
-    if (!isSupportedChainId(chainId)) {
+    if (!publicClient || !walletClient || address == null) {
+      setError("Connect the wallet that will submit this bid.");
+      return;
+    }
+    if (chainId == null || !isSupportedChainId(chainId)) {
       setError("The connected chain has no CoFHE coprocessor in this client.");
       return;
     }
@@ -137,9 +144,13 @@ export function SealBid({ bidEngineAddress, onSealed }: SealBidProps) {
     try {
       await connectCofheClient(publicClient, walletClient);
 
+      const bidder = getAddress(address);
+      const engine = getAddress(bidEngineAddress);
       const [handle, proof] = await cofheClient
         .encryptInputs([Encryptable.uint32(bid)])
-        .setConsumingContract(bidEngineAddress)
+        .setAccount(bidder)
+        .setChainId(chainId)
+        .setConsumingContract(engine)
         .onStep((step: EncryptStep, context?: EncryptStepCallbackContext) => {
           setSteps((current) => ({
             ...current,
@@ -151,7 +162,7 @@ export function SealBid({ bidEngineAddress, onSealed }: SealBidProps) {
         })
         .execute();
 
-      const result: SealedBid = { handle, proof };
+      const result: SealedBid = { handle: normalizeHandle(handle), proof: normalizeProof(proof) };
       setSealed(result);
       onSealed?.(result);
     } catch (caught) {
@@ -221,10 +232,12 @@ export function SealBid({ bidEngineAddress, onSealed }: SealBidProps) {
         onClick={() => {
           void sealBid();
         }}
-        disabled={!canSeal || basisPoints.trim() === ""}
+        disabled={!canSeal || basisPoints.trim() === "" || disabledReason != null}
       >
         {sealing ? "Sealing…" : "Seal bid"}
       </button>
+
+      {disabledReason ? <p className="text-sm text-emerald-50/70">{disabledReason}</p> : null}
 
       <ol className="flex flex-col gap-2 text-sm">
         {ENCRYPT_STEPS.map((step) => {

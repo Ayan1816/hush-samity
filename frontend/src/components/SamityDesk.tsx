@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { formatUnits, isAddress, zeroAddress, type Address, type PublicClient } from "viem";
+import { encodeFunctionData, formatUnits, getAddress, isAddress, zeroAddress, type Address, type PublicClient } from "viem";
 import {
   useAccount,
   useBlock,
@@ -10,6 +10,7 @@ import {
   usePublicClient,
   useReadContract,
   useReadContracts,
+  useWalletClient,
   useWriteContract,
 } from "wagmi";
 import { MyBid } from "@/src/components/MyBid";
@@ -17,6 +18,7 @@ import { SealBid } from "@/src/components/SealBid";
 import { Skeleton } from "@/src/components/Skeleton";
 import { pushToast } from "@/src/components/Toast";
 import { bidEngineAbi, collateralAbi, erc20Abi, phaseName, samityAbi } from "@/src/lib/abis";
+import { encodeErc20Approve } from "@/src/lib/approve";
 import { isSupportedChainId } from "@/src/config/cofhe";
 import { errorText } from "@/src/lib/errors";
 import { waitForSuccess } from "@/src/lib/receipt";
@@ -47,6 +49,40 @@ function timeText(value: bigint): string {
   const seconds = Number(value);
   if (!Number.isSafeInteger(seconds)) return value.toString();
   return `${value.toString()} · ${new Date(seconds * 1000).toISOString()}`;
+}
+
+function bidBlockedReason(input: {
+  address: Address | undefined;
+  windowKnown: boolean;
+  windowClosed: boolean;
+  phase: number | undefined;
+  isMember: boolean | undefined;
+  slashed: boolean | undefined;
+  hasWon: boolean | undefined;
+  hasLocked: boolean | undefined;
+  hasPaid: boolean | undefined;
+  canBid: boolean | undefined;
+  hasSubmitted: boolean | undefined;
+  submittedError: string | null;
+  readingSubmission: boolean;
+}): string | null {
+  if (input.address == null) return "Connect the wallet that will bid.";
+  if (!input.windowKnown) return "Waiting for the latest block timestamp.";
+  if (input.windowClosed) return "This cycle's window is closed.";
+  if (input.phase == null || input.isMember == null || input.hasLocked == null || input.hasPaid == null || input.canBid == null) {
+    return "Reading membership and the bidding window.";
+  }
+  if (input.phase !== 0) return "Bidding is not open in this phase.";
+  if (!input.isMember) return "Join the samity before bidding.";
+  if (input.slashed) return "This member is slashed and cannot bid.";
+  if (input.hasWon) return "This member already won a cycle and cannot bid again.";
+  if (!input.hasLocked) return "Lock collateral before bidding.";
+  if (!input.hasPaid) return "Pay the installment before bidding.";
+  if (input.submittedError) return input.submittedError;
+  if (input.readingSubmission || input.hasSubmitted == null) return "Reading whether this wallet already bid.";
+  if (input.hasSubmitted) return "This wallet already submitted a bid for this cycle.";
+  if (!input.canBid) return "This account cannot bid right now.";
+  return null;
 }
 
 export function SamityDesk({ samity }: { samity: Address }) {
@@ -173,14 +209,42 @@ export function SamityDesk({ samity }: { samity: Address }) {
   const hasPaid = succeeded<boolean>(userRows?.[3]);
   const hasWon = succeeded<boolean>(userRows?.[4]);
   const canBid = succeeded<boolean>(userRows?.[5]);
-  const windowClosed =
-    cycleDeadline != null && blockQuery.data != null && blockQuery.data.timestamp >= cycleDeadline;
+  const blockTimestamp = blockQuery.data?.timestamp;
+  const windowKnown = cycleDeadline != null && blockTimestamp != null;
+  const windowClosed = windowKnown && blockTimestamp >= cycleDeadline;
+
+  const submittedQuery = useReadContract({
+    address: engineReady ? bidEngine : undefined,
+    abi: bidEngineAbi,
+    functionName: "hasSubmitted",
+    args: address ? [address] : undefined,
+    chainId,
+    blockNumber,
+    query: { enabled: ready && engineReady && address != null && blockNumber != null },
+  });
+  const hasSubmitted = submittedQuery.data;
+  const blockedReason = bidBlockedReason({
+    address,
+    windowKnown,
+    windowClosed,
+    phase,
+    isMember,
+    slashed,
+    hasWon,
+    hasLocked,
+    hasPaid,
+    canBid,
+    hasSubmitted,
+    submittedError: submittedQuery.isError ? errorText(submittedQuery.error) : null,
+    readingSubmission: address != null && engineReady && submittedQuery.isLoading,
+  });
 
   function reload() {
     void publicQuery.refetch();
     void userQuery.refetch();
     void lockedQuery.refetch();
     void balanceQuery.refetch();
+    void submittedQuery.refetch();
   }
 
   const showActions =
@@ -326,36 +390,45 @@ export function SamityDesk({ samity }: { samity: Address }) {
 
           {showActions && token != null && collateral != null ? (
             <section className="flex flex-col gap-3">
-              {isMember === false && phase === 0 && currentCycle === 1n ? (
+              {!windowKnown ? <p className="text-sm text-emerald-50/70">Waiting for the latest block timestamp.</p> : null}
+              {windowClosed ? (
+                <p className="text-sm text-emerald-50/70">
+                  This cycle&apos;s window is closed. Join, collateral, payment, and bids are no longer accepted.
+                </p>
+              ) : null}
+              {windowKnown && !windowClosed && isMember === false && phase === 0 && currentCycle === 1n ? (
                 <PullAndCall
                   label="Join and lock collateral"
                   token={token}
                   spender={collateral}
                   amount={collateralAmount}
+                  amountLabel={amountText(collateralAmount, decimals, symbol)}
                   samity={samity}
                   chainId={chainId}
                   functionName="join"
                   onDone={reload}
                 />
               ) : null}
-              {isMember && slashed === false && hasLocked === false && phase === 0 ? (
+              {windowKnown && !windowClosed && isMember && slashed === false && hasLocked === false && phase === 0 ? (
                 <PullAndCall
                   label="Lock collateral"
                   token={token}
                   spender={collateral}
                   amount={collateralAmount}
+                  amountLabel={amountText(collateralAmount, decimals, symbol)}
                   samity={samity}
                   chainId={chainId}
                   functionName="lockCollateral"
                   onDone={reload}
                 />
               ) : null}
-              {isMember && slashed === false && hasLocked === true && hasPaid === false && phase === 0 ? (
+              {windowKnown && !windowClosed && isMember && slashed === false && hasLocked === true && hasPaid === false && phase === 0 ? (
                 <PullAndCall
                   label="Pay installment"
                   token={token}
                   spender={samity}
                   amount={installmentAmount}
+                  amountLabel={amountText(installmentAmount, decimals, symbol)}
                   samity={samity}
                   chainId={chainId}
                   functionName="payInstallment"
@@ -388,7 +461,13 @@ export function SamityDesk({ samity }: { samity: Address }) {
                   String(canBid)
                 )}
               </p>
-              <SealedBidSubmit bidEngine={bidEngine} chainId={chainId} onDone={reload} />
+              <SealedBidSubmit
+                bidEngine={bidEngine}
+                samity={samity}
+                chainId={chainId}
+                blockedReason={blockedReason}
+                onDone={reload}
+              />
               <MyBid bidEngineAddress={bidEngine} />
             </section>
           ) : blockNumber == null || publicQuery.isLoading ? (
@@ -420,6 +499,7 @@ function PullAndCall({
   token,
   spender,
   amount,
+  amountLabel,
   samity,
   chainId,
   functionName,
@@ -429,6 +509,7 @@ function PullAndCall({
   token: Address;
   spender: Address;
   amount: bigint;
+  amountLabel: string;
   samity: Address;
   chainId: number;
   functionName: "join" | "lockCollateral" | "payInstallment";
@@ -436,6 +517,7 @@ function PullAndCall({
 }) {
   const { address } = useAccount();
   const publicClient = usePublicClient({ chainId });
+  const { data: walletClient } = useWalletClient({ chainId });
   const { writeContractAsync } = useWriteContract();
   const allowanceQuery = useReadContract({
     address: token,
@@ -454,25 +536,41 @@ function PullAndCall({
     functionName === "join" ? "Joined the samity." : functionName === "lockCollateral" ? "Collateral locked." : "Installment paid.";
 
   async function run() {
-    if (!address || !publicClient) {
+    if (!address || !publicClient || !walletClient) {
       setError("Connect a wallet on this chain.");
       return;
     }
     setError(null);
     setHash(null);
     try {
+      const owner = getAddress(address);
+      const deadline = await publicClient.readContract({
+        address: samity,
+        abi: samityAbi,
+        functionName: "cycleDeadline",
+      });
+      const block = await publicClient.getBlock();
+      if (block.timestamp >= deadline) {
+        throw new Error("This cycle's window is closed.");
+      }
       if (allowance == null) {
         setError(allowanceQuery.error ? errorText(allowanceQuery.error) : "Waiting for the allowance.");
         return;
       }
       if (allowance < amount) {
-        setStatus("Confirm the token approval.");
-        const approveHash = await writeContractAsync({
-          address: token,
-          abi: erc20Abi,
-          functionName: "approve",
-          args: [spender, amount],
-          chainId,
+        const approval = encodeErc20Approve(token, spender, amount);
+        setStatus("Confirm the ERC-20 approval in your wallet.");
+        await publicClient.call({
+          account: owner,
+          to: approval.to,
+          data: approval.data,
+          value: approval.value,
+        });
+        const approveHash = await walletClient.sendTransaction({
+          account: owner,
+          to: approval.to,
+          data: approval.data,
+          value: approval.value,
         });
         setHash(approveHash);
         setStatus("Waiting for the approval.");
@@ -485,6 +583,7 @@ function PullAndCall({
         address: samity,
         abi: samityAbi,
         functionName,
+        account: owner,
         chainId,
       });
       setHash(txHash);
@@ -505,6 +604,7 @@ function PullAndCall({
     <div className="flex flex-col gap-2 rounded-2xl samity-card border border-emerald-200/70 bg-emerald-950/40 p-5 text-sm">
       <p className="font-semibold">{label}</p>
       <p className="text-emerald-50/70">
+        {needsApproval ? `Approve ${amountLabel} for ${spender}. ` : null}
         Allowance:{" "}
         {allowanceQuery.isError ? (
           errorText(allowanceQuery.error)
@@ -515,7 +615,7 @@ function PullAndCall({
         ) : (
           `${allowance.toString()} base units`
         )}
-        . Required: {amount.toString()} base units.
+        . Required: {amount.toString()} base units ({amountLabel}). The approval is ERC-20 approve(address,uint256).
       </p>
       <button
         type="button"
@@ -611,30 +711,79 @@ function CloseCycle({
 
 function SealedBidSubmit({
   bidEngine,
+  samity,
   chainId,
+  blockedReason,
   onDone,
 }: {
   bidEngine: Address;
+  samity: Address;
   chainId: number;
+  blockedReason: string | null;
   onDone: () => void;
 }) {
+  const { address } = useAccount();
   const publicClient = usePublicClient({ chainId });
-  const { writeContractAsync } = useWriteContract();
+  const { data: walletClient } = useWalletClient({ chainId });
   const [status, setStatus] = useState<string | null>(null);
   const [hash, setHash] = useState<`0x${string}` | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   async function onSealed(sealed: { handle: `0x${string}`; proof: `0x${string}` }, client: PublicClient) {
+    if (!address || !walletClient) {
+      setError("Connect the wallet that sealed this bid.");
+      return;
+    }
     setError(null);
     setHash(null);
-    setStatus("Confirm submitBid.");
+    setStatus("Checking membership and the bidding window.");
     try {
-      const txHash = await writeContractAsync({
-        address: bidEngine,
+      const owner = getAddress(address);
+      const engine = getAddress(bidEngine);
+      const [member, paid, deadline, submitted, allowed, block] = await Promise.all([
+        client.readContract({ address: samity, abi: samityAbi, functionName: "isMember", args: [owner] }),
+        client.readContract({ address: samity, abi: samityAbi, functionName: "hasPaid", args: [owner] }),
+        client.readContract({ address: samity, abi: samityAbi, functionName: "cycleDeadline" }),
+        client.readContract({ address: engine, abi: bidEngineAbi, functionName: "hasSubmitted", args: [owner] }),
+        client.readContract({ address: samity, abi: samityAbi, functionName: "canBid", args: [owner] }),
+        client.getBlock(),
+      ]);
+      if (!member) {
+        throw new Error("This wallet is not registered in the samity. Join before bidding.");
+      }
+      if (block.timestamp >= deadline) {
+        throw new Error("This cycle's window is closed.");
+      }
+      if (!paid) {
+        throw new Error("Pay the installment before bidding.");
+      }
+      if (submitted) {
+        throw new Error("This wallet already submitted a bid for this cycle.");
+      }
+      if (!allowed) {
+        throw new Error("This account cannot bid right now.");
+      }
+      // `externalEuint32` is a bytes32. The second argument is the 65-byte
+      // batch signature, bound to this wallet and this BidEngine.
+      const data = encodeFunctionData({
         abi: bidEngineAbi,
         functionName: "submitBid",
         args: [sealed.handle, sealed.proof],
-        chainId,
+      });
+      setStatus("Checking the encrypted bid.");
+      await client.simulateContract({
+        address: engine,
+        abi: bidEngineAbi,
+        functionName: "submitBid",
+        args: [sealed.handle, sealed.proof],
+        account: owner,
+      });
+      setStatus("Confirm submitBid.");
+      const txHash = await walletClient.sendTransaction({
+        account: owner,
+        to: engine,
+        data,
+        value: 0n,
       });
       setHash(txHash);
       setStatus("Waiting for submitBid.");
@@ -654,7 +803,12 @@ function SealedBidSubmit({
     <div className="flex flex-col gap-3">
       <SealBid
         bidEngineAddress={bidEngine}
+        disabledReason={blockedReason}
         onSealed={(sealed) => {
+          if (blockedReason) {
+            setError(blockedReason);
+            return;
+          }
           if (!publicClient) {
             setError("No public client for this chain.");
             return;
