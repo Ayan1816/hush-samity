@@ -1,6 +1,7 @@
 "use client";
 
-import { useState } from "react";
+import { keepPreviousData } from "@tanstack/react-query";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { encodeFunctionData, formatUnits, getAddress, isAddress, zeroAddress, type Address, type PublicClient } from "viem";
 import {
   useAccount,
@@ -11,17 +12,16 @@ import {
   useReadContract,
   useReadContracts,
   useWalletClient,
-  useWriteContract,
 } from "wagmi";
 import { MyBid } from "@/src/components/MyBid";
 import { SealBid } from "@/src/components/SealBid";
 import { Skeleton } from "@/src/components/Skeleton";
 import { pushToast } from "@/src/components/Toast";
 import { bidEngineAbi, collateralAbi, erc20Abi, phaseName, samityAbi } from "@/src/lib/abis";
-import { encodeErc20Approve } from "@/src/lib/approve";
+import { encodeErc20Approve, MAX_UINT256, spenderApprovalAmount } from "@/src/lib/approve";
 import { isSupportedChainId } from "@/src/config/cofhe";
 import { errorText } from "@/src/lib/errors";
-import { waitForSuccess } from "@/src/lib/receipt";
+import { sendTransactionHash, waitForSuccess } from "@/src/lib/receipt";
 
 type ReadRow = {
   status: "success" | "failure";
@@ -39,10 +39,57 @@ function failure(row: ReadRow | undefined): string | null {
   return errorText(row.error);
 }
 
+const quietRead = { placeholderData: keepPreviousData };
+
+type LocalAllowance = {
+  amount: bigint;
+  mode: "raise" | "lower";
+  /** Last chain value that is still from before this local adjustment. */
+  staleChain?: bigint;
+};
+
+type MemberFlags = {
+  isMember?: boolean;
+  hasLocked?: boolean;
+  hasPaid?: boolean;
+};
+
+function spendKey(spender: Address): string {
+  return spender.toLowerCase();
+}
+
+function formatToken(amount: bigint, decimals: number, symbol: string | undefined): string {
+  const raw = formatUnits(amount, decimals);
+  const trimmed = raw.includes(".") ? raw.replace(/0+$/, "").replace(/\.$/, "") : raw;
+  const text = trimmed === "" ? "0" : trimmed;
+  return symbol ? `${text} ${symbol}` : text;
+}
+
 function amountText(amount: bigint, decimals: number | undefined, symbol: string | undefined): string {
-  if (decimals == null) return `${amount.toString()} base units`;
-  const formatted = formatUnits(amount, decimals);
-  return symbol ? `${formatted} ${symbol}` : formatted;
+  if (amount === MAX_UINT256) return "the maximum allowance";
+  if (decimals == null) return "Reading…";
+  return formatToken(amount, decimals, symbol);
+}
+
+function shownAllowance(chain: bigint | undefined, local: LocalAllowance | undefined): bigint | undefined {
+  if (!local) return chain;
+  if (chain == null) return local.amount;
+  if (local.mode === "raise") return chain >= local.amount ? chain : local.amount;
+  if (local.staleChain != null && chain === local.staleChain) return local.amount;
+  if (chain > local.amount) return local.amount;
+  return chain;
+}
+
+function localStillNeeded(chain: bigint | undefined, local: LocalAllowance | undefined): boolean {
+  if (!local) return false;
+  if (chain == null) return true;
+  if (local.mode === "raise") return chain < local.amount;
+  if (local.staleChain != null && chain === local.staleChain) return true;
+  return chain > local.amount;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function timeText(value: bigint): string {
@@ -89,24 +136,32 @@ export function SamityDesk({ samity }: { samity: Address }) {
   const { address, chain } = useAccount();
   const chainId = isSupportedChainId(chain?.id) ? chain.id : undefined;
   const ready = chainId != null;
+  const alive = useRef(true);
+  const refreshGeneration = useRef(0);
+  const seenText = useRef(new Map<string, string>());
+  const seenDecimals = useRef<number | undefined>(undefined);
+  const seenSymbol = useRef<string | undefined>(undefined);
+  const [locals, setLocals] = useState<Record<string, LocalAllowance>>({});
+  const [memberOverride, setMemberOverride] = useState<MemberFlags | null>(null);
+  const [bidSent, setBidSent] = useState(false);
 
   const codeQuery = useBytecode({
     address: samity,
     chainId,
-    query: { enabled: ready },
+    query: { enabled: ready, ...quietRead },
   });
   const hasCode = codeQuery.data != null && codeQuery.data !== "0x";
 
   const blockNumberQuery = useBlockNumber({
     chainId,
     watch: true,
-    query: { enabled: ready && hasCode },
+    query: { enabled: ready && hasCode, ...quietRead },
   });
   const blockNumber = blockNumberQuery.data;
   const blockQuery = useBlock({
     chainId,
     blockNumber,
-    query: { enabled: ready && blockNumber != null },
+    query: { enabled: ready && blockNumber != null, ...quietRead },
   });
 
   const publicQuery = useReadContracts({
@@ -127,7 +182,7 @@ export function SamityDesk({ samity }: { samity: Address }) {
       { address: samity, chainId, abi: samityAbi, functionName: "memberCap" },
       { address: samity, chainId, abi: samityAbi, functionName: "maxDiscountCap" },
     ],
-    query: { enabled: ready && hasCode && blockNumber != null },
+    query: { enabled: ready && hasCode && blockNumber != null, ...quietRead },
   });
 
   const userQuery = useReadContracts({
@@ -143,7 +198,7 @@ export function SamityDesk({ samity }: { samity: Address }) {
           { address: samity, chainId, abi: samityAbi, functionName: "canBid", args: [address] },
         ]
       : [],
-    query: { enabled: ready && hasCode && address != null && blockNumber != null },
+    query: { enabled: ready && hasCode && address != null && blockNumber != null, ...quietRead },
   });
 
   const rows = publicQuery.data as ReadRow[] | undefined;
@@ -172,7 +227,7 @@ export function SamityDesk({ samity }: { samity: Address }) {
     functionName: "decimals",
     chainId,
     blockNumber,
-    query: { enabled: ready && tokenReady && blockNumber != null },
+    query: { enabled: ready && tokenReady && blockNumber != null, ...quietRead },
   });
   const symbolQuery = useReadContract({
     address: tokenReady ? token : undefined,
@@ -180,7 +235,7 @@ export function SamityDesk({ samity }: { samity: Address }) {
     functionName: "symbol",
     chainId,
     blockNumber,
-    query: { enabled: ready && tokenReady && blockNumber != null },
+    query: { enabled: ready && tokenReady && blockNumber != null, ...quietRead },
   });
   const balanceQuery = useReadContract({
     address: tokenReady ? token : undefined,
@@ -189,7 +244,7 @@ export function SamityDesk({ samity }: { samity: Address }) {
     args: address ? [address] : undefined,
     chainId,
     blockNumber,
-    query: { enabled: ready && tokenReady && address != null && blockNumber != null },
+    query: { enabled: ready && tokenReady && address != null && blockNumber != null, ...quietRead },
   });
   const lockedQuery = useReadContract({
     address: collateralReady ? collateral : undefined,
@@ -198,16 +253,21 @@ export function SamityDesk({ samity }: { samity: Address }) {
     args: address ? [address] : undefined,
     chainId,
     blockNumber,
-    query: { enabled: ready && collateralReady && address != null && blockNumber != null },
+    query: { enabled: ready && collateralReady && address != null && blockNumber != null, ...quietRead },
   });
 
-  const decimals = decimalsQuery.data;
-  const symbol = symbolQuery.data;
-  const isMember = succeeded<boolean>(userRows?.[0]);
+  if (typeof decimalsQuery.data === "number") seenDecimals.current = decimalsQuery.data;
+  if (typeof symbolQuery.data === "string" && symbolQuery.data !== "") seenSymbol.current = symbolQuery.data;
+  const decimals = typeof decimalsQuery.data === "number" ? decimalsQuery.data : seenDecimals.current;
+  const symbol = typeof symbolQuery.data === "string" && symbolQuery.data !== "" ? symbolQuery.data : seenSymbol.current;
+  const chainIsMember = succeeded<boolean>(userRows?.[0]);
   const slashed = succeeded<boolean>(userRows?.[1]);
-  const hasLocked = succeeded<boolean>(userRows?.[2]);
-  const hasPaid = succeeded<boolean>(userRows?.[3]);
+  const chainHasLocked = succeeded<boolean>(userRows?.[2]);
+  const chainHasPaid = succeeded<boolean>(userRows?.[3]);
   const hasWon = succeeded<boolean>(userRows?.[4]);
+  const isMember = memberOverride?.isMember ?? chainIsMember;
+  const hasLocked = memberOverride?.hasLocked ?? chainHasLocked;
+  const hasPaid = memberOverride?.hasPaid ?? chainHasPaid;
   const canBid = succeeded<boolean>(userRows?.[5]);
   const blockTimestamp = blockQuery.data?.timestamp;
   const windowKnown = cycleDeadline != null && blockTimestamp != null;
@@ -220,7 +280,7 @@ export function SamityDesk({ samity }: { samity: Address }) {
     args: address ? [address] : undefined,
     chainId,
     blockNumber,
-    query: { enabled: ready && engineReady && address != null && blockNumber != null },
+    query: { enabled: ready && engineReady && address != null && blockNumber != null, ...quietRead },
   });
   const hasSubmitted = submittedQuery.data;
   const blockedReason = bidBlockedReason({
@@ -239,19 +299,100 @@ export function SamityDesk({ samity }: { samity: Address }) {
     readingSubmission: address != null && engineReady && submittedQuery.isLoading,
   });
 
-  function reload() {
-    void publicQuery.refetch();
-    void userQuery.refetch();
-    void lockedQuery.refetch();
-    void balanceQuery.refetch();
-    void submittedQuery.refetch();
+  useEffect(() => {
+    alive.current = true;
+    return () => {
+      alive.current = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (hasSubmitted) setBidSent(false);
+  }, [hasSubmitted]);
+
+  useEffect(() => {
+    setMemberOverride((current) => {
+      if (!current) return current;
+      const memberOk = current.isMember == null || current.isMember === chainIsMember;
+      const lockedOk = current.hasLocked == null || current.hasLocked === chainHasLocked;
+      const paidOk = current.hasPaid == null || current.hasPaid === chainHasPaid;
+      return memberOk && lockedOk && paidOk ? null : current;
+    });
+  }, [chainHasLocked, chainHasPaid, chainIsMember]);
+
+  const raiseAllowance = useCallback((spender: Address, amount: bigint) => {
+    setLocals((current) => ({
+      ...current,
+      [spendKey(spender)]: { amount, mode: "raise" },
+    }));
+  }, []);
+
+  const lowerAllowance = useCallback((spender: Address, spent: bigint, chain: bigint | undefined) => {
+    setLocals((current) => {
+      const key = spendKey(spender);
+      const existing = current[key];
+      const base = existing ? existing.amount : chain;
+      if (base == null) return current;
+      const amount = base > spent ? base - spent : 0n;
+      return {
+        ...current,
+        [key]: { amount, mode: "lower", staleChain: chain },
+      };
+    });
+  }, []);
+
+  const clearAllowance = useCallback((spender: Address) => {
+    setLocals((current) => {
+      const key = spendKey(spender);
+      if (!(key in current)) return current;
+      const next = { ...current };
+      delete next[key];
+      return next;
+    });
+  }, []);
+
+  function remember(key: string, next: string): string {
+    if (next === "Reading…") return seenText.current.get(key) ?? next;
+    seenText.current.set(key, next);
+    return next;
   }
+
+  function scheduleRefresh() {
+    const generation = ++refreshGeneration.current;
+    void (async () => {
+      for (let attempt = 0; attempt < 6; attempt += 1) {
+        await sleep(1500);
+        if (!alive.current || refreshGeneration.current !== generation) return;
+        await blockNumberQuery.refetch();
+      }
+    })();
+  }
+
+  function publish(kind?: "join" | "lockCollateral" | "payInstallment") {
+    if (kind === "join") setMemberOverride((current) => ({ ...current, isMember: true, hasLocked: true }));
+    if (kind === "lockCollateral") setMemberOverride((current) => ({ ...current, hasLocked: true }));
+    if (kind === "payInstallment") setMemberOverride((current) => ({ ...current, hasPaid: true }));
+    void blockNumberQuery.refetch();
+    scheduleRefresh();
+  }
+
+  const cycles = totalCycles != null && totalCycles > 0n ? totalCycles : null;
+  const collateralApprove =
+    cycles != null && collateralAmount != null && collateralAmount > 0n && installmentAmount != null && installmentAmount > 0n
+      ? spenderApprovalAmount("collateral", collateralAmount, installmentAmount, cycles)
+      : null;
+  const installmentApprove =
+    cycles != null && collateralAmount != null && collateralAmount > 0n && installmentAmount != null && installmentAmount > 0n
+      ? spenderApprovalAmount("installment", collateralAmount, installmentAmount, cycles)
+      : null;
 
   const showActions =
     ready &&
     chainId != null &&
     tokenReady &&
     collateralReady &&
+    collateralApprove != null &&
+    installmentApprove != null &&
     installmentAmount != null &&
     collateralAmount != null &&
     phase != null &&
@@ -274,7 +415,7 @@ export function SamityDesk({ samity }: { samity: Address }) {
         </p>
       </header>
 
-      {!ready ? null : codeQuery.isLoading ? (
+      {!ready ? null : codeQuery.isLoading && codeQuery.data == null ? (
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2" aria-busy="true">
           {["code-a", "code-b", "code-c", "code-d"].map((key) => (
             <div key={key} className="flex flex-col gap-2">
@@ -292,88 +433,98 @@ export function SamityDesk({ samity }: { samity: Address }) {
           <div className="grid grid-cols-1 gap-3 rounded-2xl samity-card border border-emerald-200/70 bg-emerald-950/40 p-5 text-sm sm:grid-cols-2">
             <Stat
               label="Round"
-              value={
+              value={remember(
+                "round",
                 failure(rows?.[0]) ??
-                (currentCycle == null || totalCycles == null
-                  ? "Reading…"
-                  : `${currentCycle.toString()} of ${totalCycles.toString()}`)
-              }
+                  (currentCycle == null || totalCycles == null
+                    ? "Reading…"
+                    : `${currentCycle.toString()} of ${totalCycles.toString()}`),
+              )}
             />
-            <Stat label="Phase" value={failure(rows?.[2]) ?? (phase == null ? "Reading…" : phaseName(phase))} />
+            <Stat label="Phase" value={remember("phase", failure(rows?.[2]) ?? (phase == null ? "Reading…" : phaseName(phase)))} />
             <Stat
               label="Pool"
-              value={
-                failure(rows?.[3]) ?? (collectedPot == null ? "Reading…" : amountText(collectedPot, decimals, symbol))
-              }
+              value={remember(
+                "pool",
+                failure(rows?.[3]) ?? (collectedPot == null ? "Reading…" : amountText(collectedPot, decimals, symbol)),
+              )}
             />
             <Stat
               label="Your locked collateral"
-              value={
+              value={remember(
+                "locked",
                 address == null
                   ? "Connect a wallet."
-                  : lockedQuery.isError
-                    ? errorText(lockedQuery.error)
-                    : lockedQuery.data == null
-                      ? "Reading…"
-                      : amountText(lockedQuery.data, decimals, symbol)
-              }
+                  : lockedQuery.data == null
+                    ? lockedQuery.isError
+                      ? errorText(lockedQuery.error)
+                      : "Reading…"
+                    : amountText(lockedQuery.data, decimals, symbol),
+              )}
             />
             <Stat
               label="Deadline"
-              value={failure(rows?.[9]) ?? (cycleDeadline == null ? "Reading…" : timeText(cycleDeadline))}
+              value={remember("deadline", failure(rows?.[9]) ?? (cycleDeadline == null ? "Reading…" : timeText(cycleDeadline)))}
             />
             <Stat
               label="Chain time"
-              value={
-                blockQuery.isError
-                  ? errorText(blockQuery.error)
-                  : blockQuery.data == null
-                    ? "Reading…"
-                    : timeText(blockQuery.data.timestamp)
-              }
+              value={remember(
+                "chain-time",
+                blockQuery.data == null
+                  ? blockQuery.isError
+                    ? errorText(blockQuery.error)
+                    : "Reading…"
+                  : timeText(blockQuery.data.timestamp),
+              )}
             />
             <Stat
               label="Members"
-              value={
+              value={remember(
+                "members",
                 failure(rows?.[10]) ??
-                (memberCount == null || memberCap == null
-                  ? "Reading…"
-                  : `${memberCount.toString()} of ${memberCap.toString()}`)
-              }
+                  (memberCount == null || memberCap == null
+                    ? "Reading…"
+                    : `${memberCount.toString()} of ${memberCap.toString()}`),
+              )}
             />
             <Stat
               label="Installment"
-              value={
-                failure(rows?.[7]) ??
-                (installmentAmount == null ? "Reading…" : amountText(installmentAmount, decimals, symbol))
-              }
+              value={remember(
+                "installment",
+                failure(rows?.[7]) ?? (installmentAmount == null ? "Reading…" : amountText(installmentAmount, decimals, symbol)),
+              )}
             />
             <Stat
               label="Collateral required"
-              value={
-                failure(rows?.[8]) ??
-                (collateralAmount == null ? "Reading…" : amountText(collateralAmount, decimals, symbol))
-              }
+              value={remember(
+                "collateral",
+                failure(rows?.[8]) ?? (collateralAmount == null ? "Reading…" : amountText(collateralAmount, decimals, symbol)),
+              )}
             />
             <Stat
               label="Max discount"
-              value={failure(rows?.[12]) ?? (maxDiscountCap == null ? "Reading…" : `${maxDiscountCap.toString()} bps`)}
+              value={remember(
+                "discount",
+                failure(rows?.[12]) ?? (maxDiscountCap == null ? "Reading…" : `${maxDiscountCap.toString()} bps`),
+              )}
             />
             <Stat
               label="Your token balance"
-              value={
+              value={remember(
+                "balance",
                 address == null
                   ? "Connect a wallet."
-                  : balanceQuery.isError
-                    ? errorText(balanceQuery.error)
-                    : balanceQuery.data == null
-                      ? "Reading…"
-                      : amountText(balanceQuery.data, decimals, symbol)
-              }
+                  : balanceQuery.data == null
+                    ? balanceQuery.isError
+                      ? errorText(balanceQuery.error)
+                      : "Reading…"
+                    : amountText(balanceQuery.data, decimals, symbol),
+              )}
             />
             <Stat
               label="Your seat"
-              value={
+              value={remember(
+                "seat",
                 address == null
                   ? "Connect a wallet."
                   : failure(userRows?.[0]) ??
@@ -383,8 +534,8 @@ export function SamityDesk({ samity }: { samity: Address }) {
                         ? "Not a member."
                         : slashed
                           ? "Slashed."
-                          : `Member. Locked this cycle: ${String(hasLocked)}. Paid: ${String(hasPaid)}. Won a round: ${String(hasWon)}.`)
-              }
+                          : `Member. Locked this cycle: ${String(hasLocked)}. Paid: ${String(hasPaid)}. Won a round: ${String(hasWon)}.`),
+              )}
             />
           </div>
 
@@ -398,41 +549,87 @@ export function SamityDesk({ samity }: { samity: Address }) {
               ) : null}
               {windowKnown && !windowClosed && isMember === false && phase === 0 && currentCycle === 1n ? (
                 <PullAndCall
-                  label="Join and lock collateral"
+                  title="Join and lock collateral"
+                  buttonLabel="Join"
                   token={token}
-                  spender={collateral}
-                  amount={collateralAmount}
-                  amountLabel={amountText(collateralAmount, decimals, symbol)}
                   samity={samity}
                   chainId={chainId}
                   functionName="join"
-                  onDone={reload}
+                  decimals={decimals}
+                  symbol={symbol}
+                  locals={locals}
+                  spends={[
+                    {
+                      spender: collateral,
+                      need: collateralApprove,
+                      approve: collateralApprove,
+                      spentOnSuccess: collateralAmount,
+                      title: "Collateral",
+                    },
+                    {
+                      spender: samity,
+                      need: installmentApprove,
+                      approve: installmentApprove,
+                      spentOnSuccess: 0n,
+                      title: "Installments",
+                    },
+                  ]}
+                  onRaise={raiseAllowance}
+                  onSpend={lowerAllowance}
+                  onClear={clearAllowance}
+                  onDone={() => publish("join")}
                 />
               ) : null}
               {windowKnown && !windowClosed && isMember && slashed === false && hasLocked === false && phase === 0 ? (
                 <PullAndCall
-                  label="Lock collateral"
+                  title="Lock collateral"
+                  buttonLabel="Lock collateral"
                   token={token}
-                  spender={collateral}
-                  amount={collateralAmount}
-                  amountLabel={amountText(collateralAmount, decimals, symbol)}
                   samity={samity}
                   chainId={chainId}
                   functionName="lockCollateral"
-                  onDone={reload}
+                  decimals={decimals}
+                  symbol={symbol}
+                  locals={locals}
+                  spends={[
+                    {
+                      spender: collateral,
+                      need: collateralAmount,
+                      approve: collateralApprove,
+                      spentOnSuccess: collateralAmount,
+                      title: "Collateral",
+                    },
+                  ]}
+                  onRaise={raiseAllowance}
+                  onSpend={lowerAllowance}
+                  onClear={clearAllowance}
+                  onDone={() => publish("lockCollateral")}
                 />
               ) : null}
               {windowKnown && !windowClosed && isMember && slashed === false && hasLocked === true && hasPaid === false && phase === 0 ? (
                 <PullAndCall
-                  label="Pay installment"
+                  title="Pay installment"
+                  buttonLabel="Pay installment"
                   token={token}
-                  spender={samity}
-                  amount={installmentAmount}
-                  amountLabel={amountText(installmentAmount, decimals, symbol)}
                   samity={samity}
                   chainId={chainId}
                   functionName="payInstallment"
-                  onDone={reload}
+                  decimals={decimals}
+                  symbol={symbol}
+                  locals={locals}
+                  spends={[
+                    {
+                      spender: samity,
+                      need: installmentAmount,
+                      approve: installmentApprove,
+                      spentOnSuccess: installmentAmount,
+                      title: "Installments",
+                    },
+                  ]}
+                  onRaise={raiseAllowance}
+                  onSpend={lowerAllowance}
+                  onClear={clearAllowance}
+                  onDone={() => publish("payInstallment")}
                 />
               ) : null}
               {phase === 0 ? (
@@ -441,7 +638,7 @@ export function SamityDesk({ samity }: { samity: Address }) {
                   chainId={chainId}
                   blockReady={blockQuery.data != null}
                   windowClosed={windowClosed}
-                  onDone={reload}
+                  onDone={() => publish()}
                 />
               ) : null}
             </section>
@@ -465,12 +662,15 @@ export function SamityDesk({ samity }: { samity: Address }) {
                 bidEngine={bidEngine}
                 samity={samity}
                 chainId={chainId}
-                blockedReason={blockedReason}
-                onDone={reload}
+                blockedReason={bidSent ? "This wallet already submitted a bid for this cycle." : blockedReason}
+                onDone={() => {
+                  setBidSent(true);
+                  publish();
+                }}
               />
               <MyBid bidEngineAddress={bidEngine} />
             </section>
-          ) : blockNumber == null || publicQuery.isLoading ? (
+          ) : (blockNumber == null || publicQuery.isLoading) && publicQuery.data == null ? (
             <Skeleton className="inline-block h-4 w-40" />
           ) : (
             <p className="text-sm text-emerald-50/70">{failure(rows?.[5]) ?? "BidEngine is unavailable."}</p>
@@ -494,49 +694,112 @@ function Stat({ label, value }: { label: string; value: string }) {
   );
 }
 
+type Spend = {
+  spender: Address;
+  need: bigint;
+  approve: bigint;
+  spentOnSuccess: bigint;
+  title: string;
+};
+
+function useSpenderAllowance(
+  token: Address,
+  owner: Address | undefined,
+  spender: Address | undefined,
+  chainId: number,
+  enabled: boolean,
+) {
+  return useReadContract({
+    address: token,
+    abi: erc20Abi,
+    functionName: "allowance",
+    args: owner && spender ? [owner, spender] : undefined,
+    chainId,
+    query: {
+      enabled: enabled && owner != null && spender != null,
+      ...quietRead,
+    },
+  });
+}
+
 function PullAndCall({
-  label,
+  title,
+  buttonLabel,
   token,
-  spender,
-  amount,
-  amountLabel,
   samity,
   chainId,
   functionName,
+  decimals,
+  symbol,
+  locals,
+  spends,
+  onRaise,
+  onSpend,
+  onClear,
   onDone,
 }: {
-  label: string;
+  title: string;
+  buttonLabel: string;
   token: Address;
-  spender: Address;
-  amount: bigint;
-  amountLabel: string;
   samity: Address;
   chainId: number;
   functionName: "join" | "lockCollateral" | "payInstallment";
+  decimals: number | undefined;
+  symbol: string | undefined;
+  locals: Record<string, LocalAllowance>;
+  spends: readonly Spend[];
+  onRaise: (spender: Address, amount: bigint) => void;
+  onSpend: (spender: Address, spent: bigint, chain: bigint | undefined) => void;
+  onClear: (spender: Address) => void;
   onDone: () => void;
 }) {
   const { address } = useAccount();
   const publicClient = usePublicClient({ chainId });
   const { data: walletClient } = useWalletClient({ chainId });
-  const { writeContractAsync } = useWriteContract();
-  const allowanceQuery = useReadContract({
-    address: token,
-    abi: erc20Abi,
-    functionName: "allowance",
-    args: address ? [address, spender] : undefined,
-    chainId,
-    query: { enabled: address != null },
-  });
-  const [status, setStatus] = useState<string | null>(null);
+  const alive = useRef(true);
+  const first = spends[0];
+  const second = spends[1];
+  const firstQuery = useSpenderAllowance(token, address, first?.spender, chainId, first != null);
+  const secondQuery = useSpenderAllowance(token, address, second?.spender, chainId, second != null);
+  const [phase, setPhase] = useState<"idle" | "wallet" | "mining">("idle");
+  const [detail, setDetail] = useState<string | null>(null);
   const [hash, setHash] = useState<`0x${string}` | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const allowance = allowanceQuery.data;
-  const needsApproval = allowance != null && allowance < amount;
-  const doneText =
-    functionName === "join" ? "Joined the samity." : functionName === "lockCollateral" ? "Collateral locked." : "Installment paid.";
+  const queries = [firstQuery, secondQuery];
+  const reads = spends.map((spend, index) => {
+    const query = queries[index];
+    const chain = query?.data;
+    const local = locals[spendKey(spend.spender)];
+    return { spend, chain, local, shown: shownAllowance(chain, local), query };
+  });
+  const needsApproval = reads.some((read) => read.shown != null && read.shown < read.spend.need);
+  const waitingAllowance = reads.some((read) => read.shown == null);
+  const busy = phase !== "idle";
+
+  useEffect(() => {
+    alive.current = true;
+    return () => {
+      alive.current = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    for (const read of reads) {
+      if (read.local && !localStillNeeded(read.chain, read.local)) onClear(read.spend.spender);
+    }
+  }, [firstQuery.data, secondQuery.data, locals, onClear, reads]);
+
+  async function pollAllowances() {
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      await sleep(1000);
+      if (!alive.current) return;
+      await firstQuery.refetch();
+      if (second) await secondQuery.refetch();
+    }
+  }
 
   async function run() {
-    if (!address || !publicClient || !walletClient) {
+    if (!address || !publicClient || !walletClient || !first) {
       setError("Connect a wallet on this chain.");
       return;
     }
@@ -550,50 +813,70 @@ function PullAndCall({
         functionName: "cycleDeadline",
       });
       const block = await publicClient.getBlock();
-      if (block.timestamp >= deadline) {
-        throw new Error("This cycle's window is closed.");
-      }
-      if (allowance == null) {
-        setError(allowanceQuery.error ? errorText(allowanceQuery.error) : "Waiting for the allowance.");
+      if (block.timestamp >= deadline) throw new Error("This cycle's window is closed.");
+
+      const snapshot = spends.map((spend, index) => {
+        const chain = index === 0 ? firstQuery.data : secondQuery.data;
+        const local = locals[spendKey(spend.spender)];
+        return { spend, chain, shown: shownAllowance(chain, local) };
+      });
+      if (snapshot.some((item) => item.shown == null)) {
+        const failed = reads.find((read) => read.shown == null && read.query?.isError);
+        setError(failed?.query?.error ? errorText(failed.query.error) : "Waiting for the allowance.");
         return;
       }
-      if (allowance < amount) {
-        const approval = encodeErc20Approve(token, spender, amount);
-        setStatus("Confirm the ERC-20 approval in your wallet.");
-        await publicClient.call({
-          account: owner,
-          to: approval.to,
-          data: approval.data,
-          value: approval.value,
-        });
-        const approveHash = await walletClient.sendTransaction({
-          account: owner,
-          to: approval.to,
-          data: approval.data,
-          value: approval.value,
-        });
-        setHash(approveHash);
-        setStatus("Waiting for the approval.");
-        await waitForSuccess(publicClient, approveHash);
+      const short = snapshot.filter((item) => (item.shown ?? 0n) < item.spend.need);
+      if (short.length > 0) {
+        for (const item of short) {
+          const approval = encodeErc20Approve(token, item.spend.spender, item.spend.approve);
+          setPhase("wallet");
+          setDetail(`Confirm the ${item.spend.title.toLowerCase()} approval in your wallet.`);
+          await publicClient.call({
+            account: owner,
+            to: approval.to,
+            data: approval.data,
+            value: approval.value,
+          });
+          const approveHash = await sendTransactionHash(walletClient, {
+            account: owner,
+            to: approval.to,
+            data: approval.data,
+            value: approval.value,
+          });
+          setHash(approveHash);
+          setPhase("mining");
+          setDetail(`Waiting for the ${item.spend.title.toLowerCase()} approval.`);
+          await waitForSuccess(publicClient, approveHash);
+          onRaise(item.spend.spender, item.spend.approve);
+        }
+        setPhase("idle");
+        setDetail(null);
         pushToast("Token approval confirmed.", "ok");
-        await allowanceQuery.refetch();
+        void pollAllowances();
+        return;
       }
-      setStatus("Confirm the samity transaction.");
-      const txHash = await writeContractAsync({
-        address: samity,
-        abi: samityAbi,
-        functionName,
-        account: owner,
-        chainId,
-      });
+
+      setPhase("wallet");
+      setDetail(`Confirm ${buttonLabel} in your wallet.`);
+      const data = encodeFunctionData({ abi: samityAbi, functionName });
+      const txHash = await sendTransactionHash(walletClient, { account: owner, to: samity, data });
       setHash(txHash);
-      setStatus("Waiting for the samity transaction.");
+      setPhase("mining");
+      setDetail(`Waiting for ${buttonLabel}.`);
       await waitForSuccess(publicClient, txHash);
-      setStatus("Transaction confirmed.");
-      pushToast(doneText, "ok");
+      for (const item of snapshot) {
+        if (item.spend.spentOnSuccess > 0n) onSpend(item.spend.spender, item.spend.spentOnSuccess, item.chain);
+      }
+      const doneText =
+        functionName === "join" ? "Joined the samity." : functionName === "lockCollateral" ? "Collateral locked." : "Installment paid.";
       onDone();
+      setPhase("idle");
+      setDetail(null);
+      pushToast(doneText, "ok");
+      void pollAllowances();
     } catch (caught) {
-      setStatus(null);
+      setPhase("idle");
+      setDetail(null);
       const message = errorText(caught);
       setError(message);
       pushToast(message, "err");
@@ -602,32 +885,42 @@ function PullAndCall({
 
   return (
     <div className="flex flex-col gap-2 rounded-2xl samity-card border border-emerald-200/70 bg-emerald-950/40 p-5 text-sm">
-      <p className="font-semibold">{label}</p>
+      <p className="font-semibold">{title}</p>
       <p className="text-emerald-50/70">
-        {needsApproval ? `Approve ${amountLabel} for ${spender}. ` : null}
-        Allowance:{" "}
-        {allowanceQuery.isError ? (
-          errorText(allowanceQuery.error)
-        ) : allowanceQuery.isLoading ? (
-          <Skeleton className="inline-block h-3 w-24 align-middle" />
-        ) : allowance == null ? (
-          "Waiting for the allowance."
-        ) : (
-          `${allowance.toString()} base units`
-        )}
-        . Required: {amount.toString()} base units ({amountLabel}). The approval is ERC-20 approve(address,uint256).
+        {needsApproval
+          ? "One approval covers this samity. Pay installment will not ask for another approval. "
+          : null}
+        {reads.map((read) => {
+          const short = read.shown != null && read.shown < read.spend.need;
+          return (
+            <span key={read.spend.spender}>
+              {read.spend.title}{" "}
+              {read.shown == null ? (
+                read.query?.isError && read.query.data == null ? (
+                  errorText(read.query.error)
+                ) : (
+                  <Skeleton className="inline-block h-3 w-24 align-middle" />
+                )
+              ) : (
+                amountText(read.shown, decimals, symbol)
+              )}
+              {short ? ` · approving ${amountText(read.spend.approve, decimals, symbol)}` : ""}
+              .{" "}
+            </span>
+          );
+        })}
       </p>
       <button
         type="button"
         className="w-full rounded-lg bg-emerald-400 px-4 py-2 text-sm font-semibold text-emerald-950 disabled:opacity-40"
-        disabled={status != null || allowance == null}
+        disabled={busy || waitingAllowance}
         onClick={() => {
           void run();
         }}
       >
-        {status ? "Waiting…" : needsApproval ? "Approve and continue" : label}
+        {busy ? "Waiting…" : needsApproval ? "Approve and continue" : buttonLabel}
       </button>
-      {status ? <p className="text-emerald-50/70">{status}</p> : null}
+      {detail ? <p className="text-emerald-50/70">{detail}</p> : null}
       {hash ? <p className="break-all font-mono text-xs">{hash}</p> : null}
       {error ? <p className="text-red-300">{error}</p> : null}
     </div>
@@ -647,35 +940,44 @@ function CloseCycle({
   windowClosed: boolean;
   onDone: () => void;
 }) {
+  const { address } = useAccount();
   const publicClient = usePublicClient({ chainId });
-  const { writeContractAsync, isPending } = useWriteContract();
-  const [status, setStatus] = useState<string | null>(null);
+  const { data: walletClient } = useWalletClient({ chainId });
+  const [phase, setPhase] = useState<"idle" | "wallet" | "mining">("idle");
+  const [detail, setDetail] = useState<string | null>(null);
   const [hash, setHash] = useState<`0x${string}` | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [done, setDone] = useState(false);
+  const busy = phase !== "idle";
 
   async function close() {
-    if (!publicClient) {
-      setError("No public client for this chain.");
+    if (!address || !publicClient || !walletClient) {
+      setError("Connect a wallet on this chain.");
       return;
     }
     setError(null);
     setHash(null);
-    setStatus("Confirm closeCycle.");
     try {
-      const txHash = await writeContractAsync({
-        address: samity,
-        abi: samityAbi,
-        functionName: "closeCycle",
-        chainId,
+      const data = encodeFunctionData({ abi: samityAbi, functionName: "closeCycle" });
+      setPhase("wallet");
+      setDetail("Confirm close cycle in your wallet.");
+      const txHash = await sendTransactionHash(walletClient, {
+        account: getAddress(address),
+        to: samity,
+        data,
       });
       setHash(txHash);
-      setStatus("Waiting for closeCycle.");
+      setPhase("mining");
+      setDetail("Waiting for close cycle.");
       await waitForSuccess(publicClient, txHash);
-      setStatus("Cycle closed.");
+      setDone(true);
+      setPhase("idle");
+      setDetail("Cycle closed.");
       pushToast("Cycle closed.", "ok");
       onDone();
     } catch (caught) {
-      setStatus(null);
+      setPhase("idle");
+      setDetail(null);
       const message = errorText(caught);
       setError(message);
       pushToast(message, "err");
@@ -695,14 +997,14 @@ function CloseCycle({
       <button
         type="button"
         className="w-full rounded-lg bg-emerald-400 px-4 py-2 text-sm font-semibold text-emerald-950 disabled:opacity-40"
-        disabled={!windowClosed || isPending || status != null}
+        disabled={!windowClosed || busy || done}
         onClick={() => {
           void close();
         }}
       >
-        {status ? "Waiting…" : "Close cycle"}
+        {busy ? "Waiting…" : done ? "Cycle closed" : "Close cycle"}
       </button>
-      {status ? <p className="text-emerald-50/70">{status}</p> : null}
+      {detail ? <p className="text-emerald-50/70">{detail}</p> : null}
       {hash ? <p className="break-all font-mono text-xs">{hash}</p> : null}
       {error ? <p className="text-red-300">{error}</p> : null}
     </div>
@@ -778,8 +1080,8 @@ function SealedBidSubmit({
         args: [sealed.handle, sealed.proof],
         account: owner,
       });
-      setStatus("Confirm submitBid.");
-      const txHash = await walletClient.sendTransaction({
+      setStatus("Confirm submitBid in your wallet.");
+      const txHash = await sendTransactionHash(walletClient, {
         account: owner,
         to: engine,
         data,
