@@ -1,5 +1,6 @@
 import { numberToHex, type Address, type Hash, type Hex, type PublicClient, type TransactionReceipt, type WalletClient } from "viem";
-import { errorText } from "@/src/lib/errors";
+import { notice } from "@/src/i18n/messages";
+import { classifyError } from "@/src/lib/errors";
 
 type ReceiptClient = Pick<PublicClient, "waitForTransactionReceipt" | "getTransaction" | "call">;
 
@@ -27,7 +28,7 @@ export async function sendTransactionHash(
     ],
   });
   if (typeof hash !== "string" || !/^0x[0-9a-fA-F]{64}$/.test(hash)) {
-    throw new Error("The wallet did not return a transaction hash.");
+    throw notice("errNoTxHash");
   }
   return hash;
 }
@@ -43,7 +44,7 @@ export async function waitForSuccess(client: ReceiptClient, hash: Hash): Promise
 
   try {
     const tx = await client.getTransaction({ hash });
-    if (tx.to == null) throw new Error("The transaction reverted.");
+    if (tx.to == null) throw notice("errTxReverted");
     await client.call({
       account: tx.from,
       to: tx.to,
@@ -52,9 +53,10 @@ export async function waitForSuccess(client: ReceiptClient, hash: Hash): Promise
       blockNumber: receipt.blockNumber,
     });
   } catch (error) {
-    const text = errorText(error);
-    if (text !== "The request failed.") throw new Error(text);
+    // A replay that only says the request failed has no contract reason.
+    // Anything else is the original revert, so the active language can decode it.
+    if (classifyError(error).key !== "errRequestFailed") throw error;
   }
 
-  throw new Error("The transaction reverted.");
+  throw notice("errTxReverted");
 }

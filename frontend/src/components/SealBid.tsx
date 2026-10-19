@@ -1,7 +1,7 @@
 "use client";
 
 import { EncryptStep, Encryptable, isCofheError, type EncryptStepCallbackContext } from "@cofhe/sdk";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { getAddress, isAddress } from "viem";
 import { useAccount, usePublicClient, useReadContract, useWalletClient } from "wagmi";
 import { Skeleton } from "@/src/components/Skeleton";
@@ -177,6 +177,16 @@ export function SealBid({
   const [sealing, setSealing] = useState(false);
   const [error, setError] = useState<unknown>(null);
   const [sealed, setSealed] = useState<SealedBid | null>(null);
+  const sealGeneration = useRef(0);
+
+  useEffect(() => {
+    sealGeneration.current += 1;
+    setSealing(false);
+    setError(null);
+    setSealed(null);
+    setDurations({});
+    setSteps(idleSteps());
+  }, [address, chainId, bidEngineAddress]);
 
   const chainSupported = isSupportedChainId(chainId);
   const canSeal = isConnected && chainSupported && engineReady && publicClient != null && walletClient != null && !sealing;
@@ -214,6 +224,7 @@ export function SealBid({
       return;
     }
 
+    const generation = ++sealGeneration.current;
     setSealing(true);
     setError(null);
     setSealed(null);
@@ -222,6 +233,7 @@ export function SealBid({
 
     try {
       await connectCofheClient(publicClient, walletClient);
+      if (sealGeneration.current !== generation) return;
 
       const bidder = getAddress(address);
       const engine = getAddress(bidEngineAddress);
@@ -231,6 +243,7 @@ export function SealBid({
         .setChainId(chainId)
         .setConsumingContract(engine)
         .onStep((step: EncryptStep, context?: EncryptStepCallbackContext) => {
+          if (sealGeneration.current !== generation) return;
           setSteps((current) => ({
             ...current,
             [step]: context?.isEnd ? "done" : "running",
@@ -242,12 +255,14 @@ export function SealBid({
         .execute();
 
       const result: SealedBid = { handle: normalizeHandle(handle), proof: normalizeProof(proof) };
+      if (sealGeneration.current !== generation) return;
       setSealed(result);
       onSealed?.(result);
     } catch (caught) {
+      if (sealGeneration.current !== generation) return;
       setError(isCofheError(caught) ? caught : caught instanceof Error ? caught : notice("errEncryptionFailed"));
     } finally {
-      setSealing(false);
+      if (sealGeneration.current === generation) setSealing(false);
     }
   }
 

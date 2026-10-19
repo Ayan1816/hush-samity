@@ -210,7 +210,8 @@ export function SamityDesk({ samity }: { samity: Address }) {
   });
 
   const rows = publicQuery.data as ReadRow[] | undefined;
-  const userRows = userQuery.data as ReadRow[] | undefined;
+  // keepPreviousData would otherwise show the previous wallet's seat while the next account loads.
+  const userRows = userQuery.isPlaceholderData ? undefined : (userQuery.data as ReadRow[] | undefined);
   const currentCycle = succeeded<bigint>(rows?.[0]);
   const totalCycles = succeeded<bigint>(rows?.[1]);
   const phase = succeeded<number>(rows?.[2]);
@@ -268,6 +269,8 @@ export function SamityDesk({ samity }: { samity: Address }) {
   if (typeof symbolQuery.data === "string" && symbolQuery.data !== "") seenSymbol.current = symbolQuery.data;
   const decimals = typeof decimalsQuery.data === "number" ? decimalsQuery.data : seenDecimals.current;
   const symbol = typeof symbolQuery.data === "string" && symbolQuery.data !== "" ? symbolQuery.data : seenSymbol.current;
+  const balanceAmount = balanceQuery.isPlaceholderData ? undefined : balanceQuery.data;
+  const lockedAmount = lockedQuery.isPlaceholderData ? undefined : lockedQuery.data;
   const chainIsMember = succeeded<boolean>(userRows?.[0]);
   const slashed = succeeded<boolean>(userRows?.[1]);
   const chainHasLocked = succeeded<boolean>(userRows?.[2]);
@@ -290,7 +293,7 @@ export function SamityDesk({ samity }: { samity: Address }) {
     blockNumber,
     query: { enabled: ready && engineReady && address != null && blockNumber != null, ...quietRead },
   });
-  const hasSubmitted = submittedQuery.data;
+  const hasSubmitted = submittedQuery.isPlaceholderData ? undefined : submittedQuery.data;
   function failureText(row: ReadRow | undefined): string | null {
     if (!row || row.status !== "failure") return null;
     return format(row.error);
@@ -313,8 +316,8 @@ export function SamityDesk({ samity }: { samity: Address }) {
     hasPaid,
     canBid,
     hasSubmitted,
-    submittedError: submittedQuery.isError ? format(submittedQuery.error) : null,
-    readingSubmission: address != null && engineReady && submittedQuery.isLoading,
+    submittedError: submittedQuery.isError && !submittedQuery.isPlaceholderData ? format(submittedQuery.error) : null,
+    readingSubmission: address != null && engineReady && (submittedQuery.isLoading || submittedQuery.isPlaceholderData),
   }, t);
 
   useEffect(() => {
@@ -345,6 +348,14 @@ export function SamityDesk({ samity }: { samity: Address }) {
       return memberOk && lockedOk && paidOk ? null : current;
     });
   }, [chainHasLocked, chainHasPaid, chainIsMember]);
+
+  // Optimistic membership and allowances belong to one account. A wallet or
+  // network switch must not keep the previous account's seat or approval.
+  useEffect(() => {
+    setMemberOverride(null);
+    setBidSent(false);
+    setLocals({});
+  }, [address, chainId]);
 
   const raiseAllowance = useCallback((spender: Address, amount: bigint) => {
     setLocals((current) => ({
@@ -495,11 +506,11 @@ export function SamityDesk({ samity }: { samity: Address }) {
                 "locked",
                 address == null
                   ? t("connectShort")
-                  : lockedQuery.data == null
-                    ? lockedQuery.isError
+                  : lockedAmount == null
+                    ? lockedQuery.isError && !lockedQuery.isPlaceholderData
                       ? format(lockedQuery.error)
                       : READING
-                    : amountText(lockedQuery.data, decimals, symbol),
+                    : amountText(lockedAmount, decimals, symbol),
               )}
             />
             <Stat
@@ -554,11 +565,11 @@ export function SamityDesk({ samity }: { samity: Address }) {
                 "balance",
                 address == null
                   ? t("connectShort")
-                  : balanceQuery.data == null
-                    ? balanceQuery.isError
+                  : balanceAmount == null
+                    ? balanceQuery.isError && !balanceQuery.isPlaceholderData
                       ? format(balanceQuery.error)
                       : READING
-                    : amountText(balanceQuery.data, decimals, symbol),
+                    : amountText(balanceAmount, decimals, symbol),
               )}
             />
             <Stat
@@ -861,9 +872,11 @@ function PullAndCall({
   const [hash, setHash] = useState<`0x${string}` | null>(null);
   const [error, setError] = useState<unknown>(null);
   const queries = [firstQuery, secondQuery];
+  const accountRef = useRef(address);
+  accountRef.current = address;
   const reads = spends.map((spend, index) => {
     const query = queries[index];
-    const chain = query?.data;
+    const chain = query?.isPlaceholderData ? undefined : query?.data;
     const local = locals[spendKey(spend.spender)];
     return { spend, chain, local, shown: shownAllowance(chain, local), query };
   });
@@ -949,6 +962,12 @@ function PullAndCall({
       setDetail(notice("waitingApproval", { title: item.spend.title }));
       await waitForSuccess(publicClient, approveHash);
       if (!alive.current) return;
+      if (accountRef.current == null || getAddress(accountRef.current) !== owner) {
+        setPhase("idle");
+        setDetail(null);
+        setIntent(null);
+        return;
+      }
       onRaise(item.spend.spender, item.spend.approve);
       setPhase("idle");
       setDetail(null);
@@ -1006,6 +1025,12 @@ function PullAndCall({
       setDetail(notice("waitingNamed", { action: buttonLabel }));
       await waitForSuccess(publicClient, txHash);
       if (!alive.current) return;
+      if (accountRef.current == null || getAddress(accountRef.current) !== owner) {
+        setPhase("idle");
+        setDetail(null);
+        setIntent(null);
+        return;
+      }
       for (const item of snapshot) {
         if (item.spend.spentOnSuccess > 0n) onSpend(item.spend.spender, item.spend.spentOnSuccess, item.chain);
       }
@@ -1098,6 +1123,8 @@ function CloseCycle({
 }) {
   const { t, format } = useI18n();
   const { address } = useAccount();
+  const accountRef = useRef(address);
+  accountRef.current = address;
   const publicClient = usePublicClient({ chainId });
   const { data: walletClient } = useWalletClient({ chainId });
   const [phase, setPhase] = useState<"idle" | "wallet" | "mining">("idle");
@@ -1127,6 +1154,11 @@ function CloseCycle({
       setPhase("mining");
       setDetail(notice("waitingClose"));
       await waitForSuccess(publicClient, txHash);
+      if (accountRef.current == null || getAddress(accountRef.current) !== getAddress(address)) {
+        setPhase("idle");
+        setDetail(null);
+        return;
+      }
       setDone(true);
       setPhase("idle");
       setDetail(notice("cycleClosed"));
@@ -1201,23 +1233,28 @@ function SealedBidSubmit({
 }) {
   const { t, format } = useI18n();
   const { address } = useAccount();
+  const accountRef = useRef(address);
+  accountRef.current = address;
   const publicClient = usePublicClient({ chainId });
   const { data: walletClient } = useWalletClient({ chainId });
   const [status, setStatus] = useState<BidSubmitStatus | null>(null);
   const [hash, setHash] = useState<`0x${string}` | null>(null);
   const [error, setError] = useState<unknown>(null);
-  const seenRound = useRef<{ engine: Address; cycle: bigint | undefined } | null>(null);
+  const seenRound = useRef<{ engine: Address; cycle: bigint | undefined; account?: Address } | null>(null);
 
   useEffect(() => {
     const previous = seenRound.current;
-    seenRound.current = { engine: bidEngine, cycle: currentCycle };
+    seenRound.current = { engine: bidEngine, cycle: currentCycle, account: address };
     if (previous == null) return;
-    if (previous.engine === bidEngine && previous.cycle === currentCycle) return;
-    if (previous.engine === bidEngine && previous.cycle == null) return;
+    const sameEngine = previous.engine === bidEngine;
+    const sameAccount = previous.account === address;
+    if (sameEngine && sameAccount && previous.cycle === currentCycle) return;
+    // The first time currentCycle arrives, keep a bid that was just submitted.
+    if (sameEngine && sameAccount && previous.cycle == null) return;
     setStatus(null);
     setHash(null);
     setError(null);
-  }, [bidEngine, currentCycle]);
+  }, [address, bidEngine, currentCycle]);
 
   async function onSealed(sealed: { handle: `0x${string}`; proof: `0x${string}` }, client: PublicClient) {
     if (!address || !walletClient) {
@@ -1268,6 +1305,10 @@ function SealedBidSubmit({
       setHash(txHash);
       setStatus("waitingSubmit");
       await waitForSuccess(client, txHash);
+      if (accountRef.current == null || getAddress(accountRef.current) !== owner) {
+        setStatus(null);
+        return;
+      }
       setStatus("bidSubmitted");
       pushToast(t("bidSubmitted"), "ok");
       onDone();
