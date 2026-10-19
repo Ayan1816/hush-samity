@@ -7,7 +7,8 @@ import { formatUnits } from "viem";
 import { useAccount } from "wagmi";
 import { Skeleton } from "@/src/components/Skeleton";
 import { isSupportedChainId } from "@/src/config/cofhe";
-import { errorText } from "@/src/lib/errors";
+import { useI18n } from "@/src/i18n/LanguageProvider";
+import { notice } from "@/src/i18n/messages";
 import {
   loadMySamities,
   mergeSamityRows,
@@ -21,13 +22,14 @@ import {
 /** One automatic log scan per wallet per page session. Retry is the only way to scan again. */
 const autoLoaded = new Set<string>();
 
-function installmentText(row: MySamityRow): string {
-  if (row.decimals == null) return `${row.installmentAmount.toString()} base units`;
+function installmentText(row: MySamityRow, baseUnits: (amount: string) => string): string {
+  if (row.decimals == null) return baseUnits(row.installmentAmount.toString());
   const formatted = formatUnits(row.installmentAmount, row.decimals);
   return row.symbol ? `${formatted} ${row.symbol}` : formatted;
 }
 
 export function MySamities() {
+  const { t, format } = useI18n();
   const queryClient = useQueryClient();
   const { address, isConnected, chainId } = useAccount();
   const supported = isSupportedChainId(chainId);
@@ -46,7 +48,7 @@ export function MySamities() {
     refetchOnWindowFocus: false,
     refetchOnReconnect: false,
     queryFn: () => {
-      if (!address || chainId == null) throw new Error("Connect wallet first");
+      if (!address || chainId == null) throw notice("connectWalletFirst");
       return loadMySamities(address, chainId);
     },
   });
@@ -100,15 +102,12 @@ export function MySamities() {
   return (
     <section className="flex flex-col gap-4 rounded-2xl samity-card border border-emerald-200/70 bg-emerald-950/40 p-5">
       <header className="flex flex-col gap-1">
-        <h2 className="text-lg font-semibold">My samities</h2>
-        <p className="text-sm text-emerald-50/70">
-          Samities this wallet created or joined, read from chain logs. A created samity is one whose first cycle
-          opened on-chain and whose creator is this account.
-        </p>
+        <h2 className="text-lg font-semibold">{t("mySamitiesTitle")}</h2>
+        <p className="text-sm text-emerald-50/70">{t("mySamitiesBody")}</p>
       </header>
 
-      {!isConnected ? <p className="text-sm text-emerald-50/70">Connect wallet first</p> : null}
-      {isConnected && !supported ? <p className="text-sm text-emerald-50/70">Switch to Sepolia</p> : null}
+      {!isConnected ? <p className="text-sm text-emerald-50/70">{t("connectWalletFirst")}</p> : null}
+      {isConnected && !supported ? <p className="text-sm text-emerald-50/70">{t("switchToSepolia")}</p> : null}
 
       {showSkeletons ? (
         <div className="flex flex-col gap-3" aria-busy="true">
@@ -119,26 +118,26 @@ export function MySamities() {
 
       {walletReady && failed ? (
         <div className="flex flex-col gap-3">
-          <p className="text-sm text-red-300">{errorText(scan.error)}</p>
+          <p className="text-sm text-red-300">{format(scan.error)}</p>
           <button
             type="button"
             className="w-full rounded-lg bg-emerald-400 px-4 py-2 text-sm font-semibold text-emerald-950 disabled:cursor-not-allowed disabled:bg-emerald-950 disabled:text-emerald-50"
             disabled={scan.isFetching}
             onClick={retry}
           >
-            {scan.isFetching ? "Trying again" : "Try again"}
+            {scan.isFetching ? t("tryingAgain") : t("tryAgain")}
           </button>
         </div>
       ) : null}
 
       {walletReady && !failed && !showSkeletons && (scan.isSuccess || cached != null) && visibleRows.length === 0 ? (
         <div className="flex flex-col gap-3">
-          <p className="text-sm text-emerald-50">No samities found.</p>
+          <p className="text-sm text-emerald-50">{t("noSamities")}</p>
           <Link
             href="#create-samity"
             className="w-full rounded-lg bg-emerald-400 px-4 py-2 text-center text-sm font-semibold text-emerald-950"
           >
-            Create a samity
+            {t("createASamity")}
           </Link>
         </div>
       ) : null}
@@ -147,8 +146,7 @@ export function MySamities() {
         <div className="flex flex-col gap-3">
           {scan.data?.limited && !failed ? (
             <p className="text-sm text-emerald-50/70">
-              This list starts at block {scan.data.fromBlock.toString()}. No earlier deployment block is saved in this
-              browser, so older samities may be missing.
+              {t("listStartsAt", { block: scan.data.fromBlock.toString() })}
             </p>
           ) : null}
           <ul className="flex flex-col gap-2">
@@ -165,16 +163,16 @@ export function MySamities() {
 }
 
 function SamityLink({ row }: { row: MySamityRow }) {
+  const { t } = useI18n();
+  const amount = installmentText(row, (value) => t("baseUnits", { amount: value }));
   return (
     <Link
       href={`/samity/${row.address}`}
       className="flex flex-col gap-1 rounded-xl border border-emerald-200/20 bg-black/20 p-3"
     >
       <span className="flex flex-col gap-1 text-sm sm:flex-row sm:items-baseline sm:justify-between">
-        <span className="font-semibold">{row.role}</span>
-        <span>
-          {installmentText(row)} installment · {row.memberCap.toString()} member cap
-        </span>
+        <span className="font-semibold">{row.role === "Creator" ? t("roleCreator") : t("roleMember")}</span>
+        <span>{t("installmentCap", { amount, cap: row.memberCap.toString() })}</span>
       </span>
       <span className="break-all font-mono text-xs text-emerald-50/70">{row.address}</span>
     </Link>

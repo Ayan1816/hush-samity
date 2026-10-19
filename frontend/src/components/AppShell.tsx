@@ -1,6 +1,7 @@
 import Link from "next/link";
 import type { ReactNode } from "react";
 import { ConnectWallet } from "@/src/components/ConnectWallet";
+import { LanguageToggle } from "@/src/components/LanguageToggle";
 
 export function AppShell({ children }: { children: ReactNode }) {
   return (
@@ -10,7 +11,10 @@ export function AppShell({ children }: { children: ReactNode }) {
           <span className="text-sm uppercase tracking-[0.2em] text-emerald-300/80">Fhenix CoFHE</span>
           <span className="text-2xl font-semibold">Hush Samity</span>
         </Link>
-        <ConnectWallet />
+        <div className="flex w-full flex-col items-stretch gap-3 sm:w-auto sm:flex-row sm:items-start">
+          <LanguageToggle />
+          <ConnectWallet />
+        </div>
       </header>
       {children}
     </div>

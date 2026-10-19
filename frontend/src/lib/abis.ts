@@ -158,7 +158,24 @@ const erc20ErrorAbi = [
   { type: "error", name: "SafeERC20FailedOperation", inputs: [{ name: "token", type: "address" }] },
 ] as const;
 
-export const revertAbi = [...samityErrorAbi, ...bidEngineErrorAbi, ...cofheErrorAbi, ...erc20ErrorAbi] as const;
+const otherErrorAbi = [
+  { type: "error", name: "Unauthorized", inputs: [{ name: "account", type: "address" }] },
+  { type: "error", name: "SamityAlreadyBound", inputs: [{ name: "samity", type: "address" }] },
+  { type: "error", name: "BindAfterJoin", inputs: [] },
+  { type: "error", name: "NotSamity", inputs: [{ name: "account", type: "address" }] },
+  { type: "error", name: "NoBidsToReveal", inputs: [] },
+  { type: "error", name: "NothingToReveal", inputs: [] },
+  { type: "error", name: "NotLocked", inputs: [{ name: "account", type: "address" }] },
+  { type: "error", name: "ReentrancyGuardReentrantCall", inputs: [] },
+] as const;
+
+export const revertAbi = [
+  ...samityErrorAbi,
+  ...bidEngineErrorAbi,
+  ...cofheErrorAbi,
+  ...erc20ErrorAbi,
+  ...otherErrorAbi,
+] as const;
 
 export const collateralAbi = [
   {
@@ -192,10 +209,67 @@ export const bidEngineAbi = [
   },
   {
     type: "function",
+    name: "submittedCount",
+    stateMutability: "view",
+    inputs: [],
+    outputs: [{ name: "", type: "uint256" }],
+  },
+  {
+    type: "function",
+    name: "memberCount",
+    stateMutability: "view",
+    inputs: [],
+    outputs: [{ name: "", type: "uint256" }],
+  },
+  {
+    type: "function",
+    name: "memberAt",
+    stateMutability: "view",
+    inputs: [{ name: "index", type: "uint256" }],
+    outputs: [{ name: "", type: "address" }],
+  },
+  {
+    type: "function",
     name: "myBid",
     stateMutability: "view",
     inputs: [],
     outputs: [{ name: "", type: "bytes32" }],
+  },
+  {
+    type: "event",
+    name: "BidSubmitted",
+    inputs: [{ name: "account", type: "address", indexed: true }],
+  },
+  {
+    type: "event",
+    name: "RevealPrepared",
+    inputs: [{ name: "submittedCount", type: "uint256", indexed: false }],
+  },
+] as const;
+
+/**
+ * Task manager address compiled into `FHE.sol` and `@cofhe/sdk` `TASK_MANAGER_ADDRESS`.
+ * `submitBid` stores a handle only after `batchVerifyInputs` accepts the ZK proof.
+ */
+export const TASK_MANAGER_ADDRESS = "0xeA30c4B8b44078Bbf8a6ef5b9f1eC1626C7848D9" as const;
+
+export const taskManagerAbi = [
+  {
+    type: "function",
+    name: "isAllowed",
+    stateMutability: "view",
+    inputs: [
+      { name: "ctHash", type: "uint256" },
+      { name: "account", type: "address" },
+    ],
+    outputs: [{ name: "", type: "bool" }],
+  },
+  {
+    type: "function",
+    name: "isPubliclyAllowed",
+    stateMutability: "view",
+    inputs: [{ name: "ctHash", type: "uint256" }],
+    outputs: [{ name: "", type: "bool" }],
   },
 ] as const;
 
@@ -308,10 +382,32 @@ export const samityAbi = [
   },
   {
     type: "function",
+    name: "memberAt",
+    stateMutability: "view",
+    inputs: [{ name: "index", type: "uint256" }],
+    outputs: [{ name: "", type: "address" }],
+  },
+  {
+    type: "function",
     name: "cycleDeadline",
     stateMutability: "view",
     inputs: [],
     outputs: [{ name: "", type: "uint256" }],
+  },
+  {
+    type: "function",
+    name: "cycleResults",
+    stateMutability: "view",
+    inputs: [{ name: "cycle", type: "uint256" }],
+    outputs: [
+      { name: "settled", type: "bool" },
+      { name: "hadBids", type: "bool" },
+      { name: "winner", type: "address" },
+      { name: "discountBps", type: "uint32" },
+      { name: "dividend", type: "uint256" },
+      { name: "winnerPayout", type: "uint256" },
+      { name: "retained", type: "uint256" },
+    ],
   },
   {
     type: "function",
@@ -382,6 +478,51 @@ export const samityAbi = [
     stateMutability: "nonpayable",
     inputs: [],
     outputs: [],
+  },
+  {
+    type: "event",
+    name: "CollateralLocked",
+    inputs: [
+      { name: "account", type: "address", indexed: true },
+      { name: "cycle", type: "uint256", indexed: true },
+    ],
+  },
+  {
+    type: "event",
+    name: "InstallmentPaid",
+    inputs: [
+      { name: "account", type: "address", indexed: true },
+      { name: "cycle", type: "uint256", indexed: true },
+      { name: "amount", type: "uint256", indexed: false },
+    ],
+  },
+  {
+    type: "event",
+    name: "CycleOpened",
+    inputs: [
+      { name: "cycle", type: "uint256", indexed: true },
+      { name: "openedAt", type: "uint256", indexed: false },
+    ],
+  },
+  {
+    type: "event",
+    name: "CycleClosed",
+    inputs: [
+      { name: "cycle", type: "uint256", indexed: true },
+      { name: "hadBids", type: "bool", indexed: false },
+    ],
+  },
+  {
+    type: "event",
+    name: "CycleSettled",
+    inputs: [
+      { name: "cycle", type: "uint256", indexed: true },
+      { name: "winner", type: "address", indexed: true },
+      { name: "discountBps", type: "uint32", indexed: false },
+      { name: "dividend", type: "uint256", indexed: false },
+      { name: "winnerPayout", type: "uint256", indexed: false },
+      { name: "retained", type: "uint256", indexed: false },
+    ],
   },
 ] as const;
 

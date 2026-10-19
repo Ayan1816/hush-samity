@@ -4,8 +4,8 @@ import { useEffect, useId, useState } from "react";
 import { formatUnits } from "viem";
 import { useAccount, useBalance, useConnect, useDisconnect, useSwitchChain } from "wagmi";
 import { wagmiConfig } from "@/lib/wagmi";
-import { errorText } from "@/src/lib/errors";
 import { isSupportedChainId } from "@/src/config/cofhe";
+import { useI18n } from "@/src/i18n/LanguageProvider";
 
 function shortAddress(address: string): string {
   return `${address.slice(0, 6)}…${address.slice(-4)}`;
@@ -24,6 +24,7 @@ function formatBalance(value: bigint, decimals: number, symbol: string): string 
 }
 
 export function ConnectWallet() {
+  const { t, format } = useI18n();
   const [mounted, setMounted] = useState(false);
   const [walletOpen, setWalletOpen] = useState(false);
   const dialogTitleId = useId();
@@ -66,15 +67,15 @@ export function ConnectWallet() {
   const wrongNetwork = Boolean(isConnected && !isSupportedChainId(chain?.id));
   const switchTarget = wagmiConfig.chains[0];
   const balanceText =
-    balance == null ? "Balance loading…" : formatBalance(balance.value, balance.decimals, balance.symbol);
+    balance == null ? t("balanceLoading") : formatBalance(balance.value, balance.decimals, balance.symbol);
 
   return (
     <div className="flex w-full flex-col gap-2 text-sm sm:w-72">
       {wrongNetwork ? (
         <div className="rounded-lg border border-red-400 bg-red-950 px-3 py-2 text-red-100">
           <p>
-            {chain?.name ?? "This network"} is not a CoFHE testnet.
-            {switchTarget ? ` Switch to ${switchTarget.name}.` : null}
+            {t("notCofheNetwork", { chain: chain?.name ?? t("unknownNetwork") })}
+            {switchTarget ? ` ${t("switchToNamed", { chain: switchTarget.name })}` : null}
           </p>
           <button
             type="button"
@@ -84,23 +85,23 @@ export function ConnectWallet() {
               if (switchTarget) switchChain({ chainId: switchTarget.id });
             }}
           >
-            {switching ? "Switching…" : "Switch network"}
+            {switching ? t("switching") : t("switchNetwork")}
           </button>
-          {switchError ? <p className="mt-2 text-red-200">{errorText(switchError)}</p> : null}
+          {switchError ? <p className="mt-2 text-red-200">{format(switchError)}</p> : null}
         </div>
       ) : null}
 
       {isConnected && address ? (
         <div className="samity-card flex flex-col gap-1 rounded-xl border bg-emerald-950/40 px-3 py-2">
           <p className="font-mono font-medium">{shortAddress(address)}</p>
-          <p className="text-emerald-50/80">{chain?.name ?? "Unknown network"}</p>
+          <p className="text-emerald-50/80">{chain?.name ?? t("unknownNetwork")}</p>
           <p className="text-emerald-50/80">{balanceText}</p>
           <button
             type="button"
             className="mt-1 w-fit text-emerald-200 underline-offset-2 hover:underline"
             onClick={() => disconnect()}
           >
-            Disconnect
+            {t("disconnect")}
           </button>
         </div>
       ) : (
@@ -109,7 +110,7 @@ export function ConnectWallet() {
           className="w-full rounded-lg bg-emerald-400 px-4 py-2 font-medium text-emerald-950"
           onClick={() => setWalletOpen(true)}
         >
-          Connect Wallet
+          {t("connectWallet")}
         </button>
       )}
 
@@ -126,11 +127,11 @@ export function ConnectWallet() {
             onClick={(event) => event.stopPropagation()}
           >
             <h2 id={dialogTitleId} className="text-lg font-medium">
-              Connect a wallet
+              {t("connectAWallet")}
             </h2>
             <div className="mt-4 flex flex-col gap-2">
               {availableConnectors.length === 0 ? (
-                <p className="text-emerald-50/70">No injected wallet is available in this browser.</p>
+                <p className="text-emerald-50/70">{t("noInjected")}</p>
               ) : (
                 availableConnectors.map((connector) => {
                   const pending = isPending && variables?.connector.uid === connector.uid;
@@ -142,19 +143,19 @@ export function ConnectWallet() {
                       disabled={isPending}
                       onClick={() => connect({ connector })}
                     >
-                      {pending ? "Confirm in the wallet…" : connector.name}
+                      {pending ? t("confirmInWallet") : connector.name}
                     </button>
                   );
                 })
               )}
             </div>
-            {error ? <p className="mt-3 text-red-300">{errorText(error)}</p> : null}
+            {error ? <p className="mt-3 text-red-300">{format(error)}</p> : null}
             <button
               type="button"
               className="mt-4 w-full rounded-lg border border-emerald-200/40 px-3 py-2"
               onClick={() => setWalletOpen(false)}
             >
-              Close
+              {t("close")}
             </button>
           </div>
         </div>

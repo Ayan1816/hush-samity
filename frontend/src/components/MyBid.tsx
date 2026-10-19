@@ -1,25 +1,24 @@
 "use client";
 
-import { FheTypes, isCofheError } from "@cofhe/sdk";
-import { useState } from "react";
+import { FheTypes } from "@cofhe/sdk";
+import { useEffect, useRef, useState } from "react";
 import { isAddress, zeroHash } from "viem";
 import { useAccount, usePublicClient, useReadContract, useWalletClient } from "wagmi";
 import { Skeleton } from "@/src/components/Skeleton";
 import { connectCofheClient, cofheClient, isSupportedChainId } from "@/src/config/cofhe";
+import { useI18n } from "@/src/i18n/LanguageProvider";
+import { notice } from "@/src/i18n/messages";
 import { bidEngineAbi } from "@/src/lib/abis";
-import { errorText as revertText } from "@/src/lib/errors";
-
-function errorText(error: unknown): string {
-  if (isCofheError(error)) return error.message;
-  return revertText(error);
-}
 
 export type MyBidProps = {
   /** `BidEngine` that stored this account's `euint32` and called `FHE.allow` for it. */
   bidEngineAddress: `0x${string}`;
+  /** Plaintext from `decryptForView`, which unseals the ciphertext for this wallet. */
+  onPlaintext?: (bps: bigint | null) => void;
 };
 
-export function MyBid({ bidEngineAddress }: MyBidProps) {
+export function MyBid({ bidEngineAddress, onPlaintext }: MyBidProps) {
+  const { t, format } = useI18n();
   const { address, chainId, isConnected } = useAccount();
   const publicClient = usePublicClient();
   const { data: walletClient } = useWalletClient();
@@ -38,37 +37,47 @@ export function MyBid({ bidEngineAddress }: MyBidProps) {
 
   const handle = bidQuery.data;
   const handleReady = handle != null && handle !== zeroHash;
-
   const [decrypting, setDecrypting] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<unknown>(null);
   const [plaintext, setPlaintext] = useState<bigint | null>(null);
-  const [status, setStatus] = useState<string | null>(null);
+  const [status, setStatus] = useState<ReturnType<typeof notice> | null>(null);
+  const previousHandle = useRef<typeof handle>(undefined);
+
+  useEffect(() => {
+    const previous = previousHandle.current;
+    previousHandle.current = handle;
+    if (previous != null && previous !== handle) {
+      setPlaintext(null);
+      onPlaintext?.(null);
+    }
+  }, [handle, onPlaintext]);
 
   async function decryptMine() {
     if (!publicClient || !walletClient || !handleReady || handle == null) {
-      setError("Connect the bidding account. The bid handle comes from BidEngine.myBid.");
+      setError(notice("connectBiddingAccount"));
       return;
     }
     if (!chainSupported) {
-      setError("The connected chain has no CoFHE coprocessor in this client.");
+      setError(notice("noCoprocessor"));
       return;
     }
 
     setDecrypting(true);
     setError(null);
     setPlaintext(null);
-    setStatus("Requesting access control permission…");
+    setStatus(notice("statusAcp"));
 
     try {
       await connectCofheClient(publicClient, walletClient);
       const acp = await cofheClient.acp.getOrCreateSelfACP();
-      setStatus("Decrypting your bid…");
+      setStatus(notice("statusDecrypting"));
       const value = await cofheClient.decryptForView(handle, FheTypes.Uint32).withACP(acp).execute();
       setPlaintext(value);
+      onPlaintext?.(value);
       setStatus(null);
     } catch (caught) {
       setStatus(null);
-      setError(errorText(caught));
+      setError(caught);
     } finally {
       setDecrypting(false);
     }
@@ -77,36 +86,34 @@ export function MyBid({ bidEngineAddress }: MyBidProps) {
   return (
     <section className="flex flex-col gap-4 rounded-2xl samity-card border border-emerald-200/70 bg-emerald-950/40 p-5">
       <header className="flex flex-col gap-1">
-        <h2 className="text-lg font-semibold">My bid</h2>
-        <p className="text-sm text-emerald-50/70">
-          myBid returns only the connected account&apos;s handle. Decryption uses that account&apos;s self ACP.
-        </p>
+        <h2 className="text-lg font-semibold">{t("myBidTitle")}</h2>
+        <p className="text-sm text-emerald-50/70">{t("myBidBody")}</p>
       </header>
 
       <dl className="grid gap-2 text-sm">
         <div className="flex justify-between gap-4">
-          <dt className="text-emerald-50/60">Account</dt>
-          <dd className="font-mono">{address ?? "Not connected"}</dd>
+          <dt className="text-emerald-50/60">{t("account")}</dt>
+          <dd className="font-mono">{address ?? t("notConnected")}</dd>
         </div>
         <div>
-          <dt className="text-emerald-50/60">Bid handle</dt>
+          <dt className="text-emerald-50/60">{t("bidHandle")}</dt>
           <dd className="break-all font-mono text-xs">
             {!isConnected ? (
-              "Connect a wallet."
+              t("connectShort")
             ) : bidQuery.isLoading ? (
               <Skeleton className="inline-block h-3 w-40 align-middle" />
             ) : bidQuery.error ? (
-              errorText(bidQuery.error)
+              format(bidQuery.error)
             ) : handleReady ? (
               handle
             ) : (
-              "BidEngine returned an empty handle."
+              t("emptyHandle")
             )}
           </dd>
         </div>
         <div className="flex justify-between gap-4">
-          <dt className="text-emerald-50/60">Plaintext</dt>
-          <dd className="font-mono">{plaintext == null ? "Not decrypted" : `${plaintext.toString()} bps`}</dd>
+          <dt className="text-emerald-50/60">{t("plaintext")}</dt>
+          <dd className="font-mono">{plaintext == null ? t("notDecrypted") : t("bps", { value: plaintext.toString() })}</dd>
         </div>
       </dl>
 
@@ -118,11 +125,11 @@ export function MyBid({ bidEngineAddress }: MyBidProps) {
         }}
         disabled={!handleReady || !chainSupported || publicClient == null || walletClient == null || decrypting}
       >
-        {decrypting ? "Decrypting…" : "Decrypt my bid"}
+        {decrypting ? t("decrypting") : t("decryptMyBid")}
       </button>
 
-      {status ? <p className="text-sm text-emerald-50/70">{status}</p> : null}
-      {error ? <p className="text-sm text-red-300">{error}</p> : null}
+      {status ? <p className="text-sm text-emerald-50/70">{format(status)}</p> : null}
+      {error ? <p className="text-sm text-red-300">{format(error)}</p> : null}
     </section>
   );
 }

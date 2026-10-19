@@ -29,11 +29,35 @@ export function wholeSamityAllowance(collateralAmount: bigint, installmentAmount
   return collateralAmount + installments;
 }
 
+export type FundingAction = "join" | "lockCollateral" | "payInstallment";
+
 /**
- * Allowance written for one spender during the join approval.
- * Installments use the whole-samity total, which is enough for every cycle.
- * Collateral is pulled again every cycle, so that spender gets enough for every lock
- * (the whole-samity total when that is larger, otherwise uint256 max on overflow).
+ * Token units the current transaction will pull.
+ * Join and `lockCollateral` pull `collateralAmount` into the collateral contract.
+ * `payInstallment` pulls `installmentAmount` into the samity.
+ * This is the only figure compared with `allowance`. It is not the approval amount.
+ */
+export function requiredForCurrentStep(
+  action: FundingAction,
+  collateralAmount: bigint,
+  installmentAmount: bigint,
+): bigint {
+  if (action === "payInstallment") {
+    if (installmentAmount <= 0n) throw new Error("The installment amount must be greater than zero.");
+    return installmentAmount;
+  }
+  if (action !== "join" && action !== "lockCollateral") {
+    throw new Error("The funding action is not join, lockCollateral, or payInstallment.");
+  }
+  if (collateralAmount <= 0n) throw new Error("The collateral amount must be greater than zero.");
+  return collateralAmount;
+}
+
+/**
+ * One `approve` transaction for the spender that is short.
+ * The amount is the whole obligation: `collateralAmount + installmentAmount * totalCycles`.
+ * Both spenders receive that figure. The button is hidden once the on-chain allowance
+ * already covers `requiredForCurrentStep`, so a later installment does not approve again.
  */
 export function spenderApprovalAmount(
   kind: "collateral" | "installment",
@@ -41,11 +65,10 @@ export function spenderApprovalAmount(
   installmentAmount: bigint,
   totalCycles: bigint,
 ): bigint {
-  const combined = wholeSamityAllowance(collateralAmount, installmentAmount, totalCycles);
-  if (kind === "installment" || combined === MAX_UINT256) return combined;
-  const locks = saturatingMul(collateralAmount, totalCycles);
-  if (locks === MAX_UINT256) return MAX_UINT256;
-  return locks > combined ? locks : combined;
+  if (kind !== "collateral" && kind !== "installment") {
+    throw new Error("The spender kind is not collateral or installment.");
+  }
+  return wholeSamityAllowance(collateralAmount, installmentAmount, totalCycles);
 }
 
 /**

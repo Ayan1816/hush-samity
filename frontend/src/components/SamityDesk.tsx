@@ -2,7 +2,7 @@
 
 import { keepPreviousData } from "@tanstack/react-query";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { encodeFunctionData, formatUnits, getAddress, isAddress, zeroAddress, type Address, type PublicClient } from "viem";
+import { encodeFunctionData, getAddress, isAddress, zeroAddress, type Address, type PublicClient } from "viem";
 import {
   useAccount,
   useBlock,
@@ -13,14 +13,20 @@ import {
   useReadContracts,
   useWalletClient,
 } from "wagmi";
+import { ChainView } from "@/src/components/ChainView";
+import { InviteBar } from "@/src/components/InviteBar";
 import { MyBid } from "@/src/components/MyBid";
+import { RoundReceipts } from "@/src/components/RoundReceipts";
+import { RoundTimeline } from "@/src/components/RoundTimeline";
 import { SealBid } from "@/src/components/SealBid";
 import { Skeleton } from "@/src/components/Skeleton";
 import { pushToast } from "@/src/components/Toast";
-import { bidEngineAbi, collateralAbi, erc20Abi, phaseName, samityAbi } from "@/src/lib/abis";
-import { encodeErc20Approve, MAX_UINT256, spenderApprovalAmount } from "@/src/lib/approve";
+import { useI18n } from "@/src/i18n/LanguageProvider";
+import { notice, type MessageKey, type Notice } from "@/src/i18n/messages";
+import { bidEngineAbi, collateralAbi, erc20Abi, samityAbi } from "@/src/lib/abis";
+import { encodeErc20Approve, MAX_UINT256, requiredForCurrentStep, wholeSamityAllowance } from "@/src/lib/approve";
+import { formatTokenAmount } from "@/src/lib/tokenFormat";
 import { isSupportedChainId } from "@/src/config/cofhe";
-import { errorText } from "@/src/lib/errors";
 import { sendTransactionHash, waitForSuccess } from "@/src/lib/receipt";
 
 type ReadRow = {
@@ -34,12 +40,8 @@ function succeeded<T>(row: ReadRow | undefined): T | undefined {
   return row.result as T;
 }
 
-function failure(row: ReadRow | undefined): string | null {
-  if (!row || row.status !== "failure") return null;
-  return errorText(row.error);
-}
-
 const quietRead = { placeholderData: keepPreviousData };
+const READING = "Reading…";
 
 type LocalAllowance = {
   amount: bigint;
@@ -59,15 +61,18 @@ function spendKey(spender: Address): string {
 }
 
 function formatToken(amount: bigint, decimals: number, symbol: string | undefined): string {
-  const raw = formatUnits(amount, decimals);
-  const trimmed = raw.includes(".") ? raw.replace(/0+$/, "").replace(/\.$/, "") : raw;
-  const text = trimmed === "" ? "0" : trimmed;
-  return symbol ? `${text} ${symbol}` : text;
+  return formatTokenAmount(amount, decimals, symbol);
 }
 
-function amountText(amount: bigint, decimals: number | undefined, symbol: string | undefined): string {
-  if (amount === MAX_UINT256) return "the maximum allowance";
-  if (decimals == null) return "Reading…";
+function amountText(
+  amount: bigint,
+  decimals: number | undefined,
+  symbol: string | undefined,
+  reading = READING,
+  maximum = READING,
+): string {
+  if (amount === MAX_UINT256) return maximum;
+  if (decimals == null) return reading;
   return formatToken(amount, decimals, symbol);
 }
 
@@ -112,27 +117,28 @@ function bidBlockedReason(input: {
   hasSubmitted: boolean | undefined;
   submittedError: string | null;
   readingSubmission: boolean;
-}): string | null {
-  if (input.address == null) return "Connect the wallet that will bid.";
-  if (!input.windowKnown) return "Waiting for the latest block timestamp.";
-  if (input.windowClosed) return "This cycle's window is closed.";
+}, t: (key: MessageKey) => string): string | null {
+  if (input.address == null) return t("connectBidder");
+  if (!input.windowKnown) return t("gateWaitingTimestamp");
+  if (input.windowClosed) return t("err_WindowClosed");
   if (input.phase == null || input.isMember == null || input.hasLocked == null || input.hasPaid == null || input.canBid == null) {
-    return "Reading membership and the bidding window.";
+    return t("gateReadingMembership");
   }
-  if (input.phase !== 0) return "Bidding is not open in this phase.";
-  if (!input.isMember) return "Join the samity before bidding.";
-  if (input.slashed) return "This member is slashed and cannot bid.";
-  if (input.hasWon) return "This member already won a cycle and cannot bid again.";
-  if (!input.hasLocked) return "Lock collateral before bidding.";
-  if (!input.hasPaid) return "Pay the installment before bidding.";
+  if (input.phase !== 0) return t("gatePhase");
+  if (!input.isMember) return t("gateJoinFirst");
+  if (input.slashed) return t("gateSlashed");
+  if (input.hasWon) return t("gateWon");
+  if (!input.hasLocked) return t("gateLockFirst");
+  if (!input.hasPaid) return t("gatePayFirst");
   if (input.submittedError) return input.submittedError;
-  if (input.readingSubmission || input.hasSubmitted == null) return "Reading whether this wallet already bid.";
-  if (input.hasSubmitted) return "This wallet already submitted a bid for this cycle.";
-  if (!input.canBid) return "This account cannot bid right now.";
+  if (input.readingSubmission || input.hasSubmitted == null) return t("gateReadingSubmission");
+  if (input.hasSubmitted) return t("alreadySubmitted");
+  if (!input.canBid) return t("gateCannotBid");
   return null;
 }
 
 export function SamityDesk({ samity }: { samity: Address }) {
+  const { t, format } = useI18n();
   const { address, chain } = useAccount();
   const chainId = isSupportedChainId(chain?.id) ? chain.id : undefined;
   const ready = chainId != null;
@@ -144,6 +150,8 @@ export function SamityDesk({ samity }: { samity: Address }) {
   const [locals, setLocals] = useState<Record<string, LocalAllowance>>({});
   const [memberOverride, setMemberOverride] = useState<MemberFlags | null>(null);
   const [bidSent, setBidSent] = useState(false);
+  const [draftBps, setDraftBps] = useState<bigint | null>(null);
+  const [unsealedBps, setUnsealedBps] = useState<bigint | null>(null);
 
   const codeQuery = useBytecode({
     address: samity,
@@ -283,6 +291,16 @@ export function SamityDesk({ samity }: { samity: Address }) {
     query: { enabled: ready && engineReady && address != null && blockNumber != null, ...quietRead },
   });
   const hasSubmitted = submittedQuery.data;
+  function failureText(row: ReadRow | undefined): string | null {
+    if (!row || row.status !== "failure") return null;
+    return format(row.error);
+  }
+  function phaseLabel(value: number): string {
+    if (value === 0) return t("phaseBidding");
+    if (value === 1) return t("phaseReveal");
+    if (value === 2) return t("phaseComplete");
+    return t("phaseUnknown", { phase: value });
+  }
   const blockedReason = bidBlockedReason({
     address,
     windowKnown,
@@ -295,9 +313,9 @@ export function SamityDesk({ samity }: { samity: Address }) {
     hasPaid,
     canBid,
     hasSubmitted,
-    submittedError: submittedQuery.isError ? errorText(submittedQuery.error) : null,
+    submittedError: submittedQuery.isError ? format(submittedQuery.error) : null,
     readingSubmission: address != null && engineReady && submittedQuery.isLoading,
-  });
+  }, t);
 
   useEffect(() => {
     alive.current = true;
@@ -309,6 +327,14 @@ export function SamityDesk({ samity }: { samity: Address }) {
   useEffect(() => {
     if (hasSubmitted) setBidSent(false);
   }, [hasSubmitted]);
+
+  const roundKey = `${address ?? ""}:${bidEngine ?? ""}:${currentCycle?.toString() ?? ""}`;
+  const roundRef = useRef(roundKey);
+  useEffect(() => {
+    if (roundRef.current === roundKey) return;
+    roundRef.current = roundKey;
+    setUnsealedBps(null);
+  }, [roundKey]);
 
   useEffect(() => {
     setMemberOverride((current) => {
@@ -377,13 +403,17 @@ export function SamityDesk({ samity }: { samity: Address }) {
   }
 
   const cycles = totalCycles != null && totalCycles > 0n ? totalCycles : null;
-  const collateralApprove =
+  const obligation =
     cycles != null && collateralAmount != null && collateralAmount > 0n && installmentAmount != null && installmentAmount > 0n
-      ? spenderApprovalAmount("collateral", collateralAmount, installmentAmount, cycles)
+      ? wholeSamityAllowance(collateralAmount, installmentAmount, cycles)
       : null;
-  const installmentApprove =
-    cycles != null && collateralAmount != null && collateralAmount > 0n && installmentAmount != null && installmentAmount > 0n
-      ? spenderApprovalAmount("installment", collateralAmount, installmentAmount, cycles)
+  const collateralNeed =
+    collateralAmount != null && collateralAmount > 0n && installmentAmount != null
+      ? requiredForCurrentStep("lockCollateral", collateralAmount, installmentAmount)
+      : null;
+  const installmentNeed =
+    collateralAmount != null && installmentAmount != null && installmentAmount > 0n
+      ? requiredForCurrentStep("payInstallment", collateralAmount, installmentAmount)
       : null;
 
   const showActions =
@@ -391,8 +421,9 @@ export function SamityDesk({ samity }: { samity: Address }) {
     chainId != null &&
     tokenReady &&
     collateralReady &&
-    collateralApprove != null &&
-    installmentApprove != null &&
+    obligation != null &&
+    collateralNeed != null &&
+    installmentNeed != null &&
     installmentAmount != null &&
     collateralAmount != null &&
     phase != null &&
@@ -406,12 +437,10 @@ export function SamityDesk({ samity }: { samity: Address }) {
   return (
     <main className="flex flex-col gap-6">
       <header className="flex flex-col gap-1">
-        <h1 className="text-2xl font-semibold">Samity</h1>
+        <h1 className="text-2xl font-semibold">{t("samityHeading")}</h1>
         <p className="break-all font-mono text-xs text-emerald-50/70">{samity}</p>
         <p className="text-sm text-emerald-50/70">
-          {chainId == null
-            ? "Connect a wallet on Ethereum Sepolia, Arbitrum Sepolia, or Base Sepolia. Reads use that chain."
-            : `Reading ${chain?.name ?? chainId}.`}
+          {chainId == null ? t("connectSupported") : t("readingChain", { chain: chain?.name ?? chainId })}
         </p>
       </header>
 
@@ -425,132 +454,181 @@ export function SamityDesk({ samity }: { samity: Address }) {
           ))}
         </div>
       ) : codeQuery.isError ? (
-        <p className="text-sm text-red-300">{errorText(codeQuery.error)}</p>
+        <p className="text-sm text-red-300">{format(codeQuery.error)}</p>
       ) : !hasCode ? (
-        <p className="text-sm text-emerald-50/70">No contract code at this address on {chain?.name}.</p>
+        <p className="text-sm text-emerald-50/70">{t("noCodeOnChain", { chain: chain?.name ?? "" })}</p>
       ) : (
         <>
+          {chainId != null ? (
+            <InviteBar
+              samity={samity}
+              installmentAmount={installmentAmount ?? null}
+              collateralAmount={collateralAmount ?? null}
+              deadline={cycleDeadline ?? null}
+              currentCycle={currentCycle ?? null}
+              decimals={decimals}
+              symbol={symbol}
+            />
+          ) : null}
           <div className="grid grid-cols-1 gap-3 rounded-2xl samity-card border border-emerald-200/70 bg-emerald-950/40 p-5 text-sm sm:grid-cols-2">
             <Stat
-              label="Round"
+              label={t("statRound")}
               value={remember(
                 "round",
-                failure(rows?.[0]) ??
+                failureText(rows?.[0]) ??
                   (currentCycle == null || totalCycles == null
-                    ? "Reading…"
-                    : `${currentCycle.toString()} of ${totalCycles.toString()}`),
+                    ? READING
+                    : t("roundOf", { current: currentCycle.toString(), total: totalCycles.toString() })),
               )}
             />
-            <Stat label="Phase" value={remember("phase", failure(rows?.[2]) ?? (phase == null ? "Reading…" : phaseName(phase)))} />
+            <Stat label={t("statPhase")} value={remember("phase", failureText(rows?.[2]) ?? (phase == null ? READING : phaseLabel(phase)))} />
             <Stat
-              label="Pool"
+              label={t("statPool")}
               value={remember(
                 "pool",
-                failure(rows?.[3]) ?? (collectedPot == null ? "Reading…" : amountText(collectedPot, decimals, symbol)),
+                failureText(rows?.[3]) ?? (collectedPot == null ? READING : amountText(collectedPot, decimals, symbol)),
               )}
             />
             <Stat
-              label="Your locked collateral"
+              label={t("statLocked")}
               value={remember(
                 "locked",
                 address == null
-                  ? "Connect a wallet."
+                  ? t("connectShort")
                   : lockedQuery.data == null
                     ? lockedQuery.isError
-                      ? errorText(lockedQuery.error)
-                      : "Reading…"
+                      ? format(lockedQuery.error)
+                      : READING
                     : amountText(lockedQuery.data, decimals, symbol),
               )}
             />
             <Stat
-              label="Deadline"
-              value={remember("deadline", failure(rows?.[9]) ?? (cycleDeadline == null ? "Reading…" : timeText(cycleDeadline)))}
+              label={t("statDeadline")}
+              value={remember("deadline", failureText(rows?.[9]) ?? (cycleDeadline == null ? READING : timeText(cycleDeadline)))}
             />
             <Stat
-              label="Chain time"
+              label={t("statChainTime")}
               value={remember(
                 "chain-time",
                 blockQuery.data == null
                   ? blockQuery.isError
-                    ? errorText(blockQuery.error)
-                    : "Reading…"
+                    ? format(blockQuery.error)
+                    : READING
                   : timeText(blockQuery.data.timestamp),
               )}
             />
             <Stat
-              label="Members"
+              label={t("statMembers")}
               value={remember(
                 "members",
-                failure(rows?.[10]) ??
+                failureText(rows?.[10]) ??
                   (memberCount == null || memberCap == null
-                    ? "Reading…"
-                    : `${memberCount.toString()} of ${memberCap.toString()}`),
+                    ? READING
+                    : t("membersOf", { count: memberCount.toString(), cap: memberCap.toString() })),
               )}
             />
             <Stat
-              label="Installment"
+              label={t("statInstallment")}
               value={remember(
                 "installment",
-                failure(rows?.[7]) ?? (installmentAmount == null ? "Reading…" : amountText(installmentAmount, decimals, symbol)),
+                failureText(rows?.[7]) ?? (installmentAmount == null ? READING : amountText(installmentAmount, decimals, symbol)),
               )}
             />
             <Stat
-              label="Collateral required"
+              label={t("statCollateralRequired")}
               value={remember(
                 "collateral",
-                failure(rows?.[8]) ?? (collateralAmount == null ? "Reading…" : amountText(collateralAmount, decimals, symbol)),
+                failureText(rows?.[8]) ?? (collateralAmount == null ? READING : amountText(collateralAmount, decimals, symbol)),
               )}
             />
             <Stat
-              label="Max discount"
+              label={t("statMaxDiscount")}
               value={remember(
                 "discount",
-                failure(rows?.[12]) ?? (maxDiscountCap == null ? "Reading…" : `${maxDiscountCap.toString()} bps`),
+                failureText(rows?.[12]) ?? (maxDiscountCap == null ? READING : t("bps", { value: maxDiscountCap.toString() })),
               )}
             />
             <Stat
-              label="Your token balance"
+              label={t("statBalance")}
               value={remember(
                 "balance",
                 address == null
-                  ? "Connect a wallet."
+                  ? t("connectShort")
                   : balanceQuery.data == null
                     ? balanceQuery.isError
-                      ? errorText(balanceQuery.error)
-                      : "Reading…"
+                      ? format(balanceQuery.error)
+                      : READING
                     : amountText(balanceQuery.data, decimals, symbol),
               )}
             />
             <Stat
-              label="Your seat"
+              label={t("statSeat")}
               value={remember(
                 "seat",
                 address == null
-                  ? "Connect a wallet."
-                  : failure(userRows?.[0]) ??
+                  ? t("connectShort")
+                  : failureText(userRows?.[0]) ??
                     (isMember == null
-                      ? "Reading…"
+                      ? READING
                       : !isMember
-                        ? "Not a member."
+                        ? t("notAMember")
                         : slashed
-                          ? "Slashed."
-                          : `Member. Locked this cycle: ${String(hasLocked)}. Paid: ${String(hasPaid)}. Won a round: ${String(hasWon)}.`),
+                          ? t("slashed")
+                          : t("memberSeat", {
+                              locked: hasLocked ? t("yes") : t("no"),
+                              paid: hasPaid ? t("yes") : t("no"),
+                              won: hasWon ? t("yes") : t("no"),
+                            })),
               )}
             />
           </div>
 
-          {showActions && token != null && collateral != null ? (
+          {chainId != null ? (
+            <RoundTimeline
+              samity={samity}
+              bidEngine={engineReady && bidEngine != null ? bidEngine : null}
+              chainId={chainId}
+              account={address}
+              blockNumber={blockNumber}
+              currentRound={currentCycle}
+              phase={phase}
+              deadline={cycleDeadline}
+              chainTime={blockTimestamp}
+              memberCount={memberCount}
+              memberCap={memberCap}
+            />
+          ) : null}
+
+          {chainId != null ? (
+            <RoundReceipts
+              samity={samity}
+              bidEngine={engineReady && bidEngine != null ? bidEngine : null}
+              token={tokenReady && token != null ? token : null}
+              chainId={chainId}
+              account={address}
+              blockNumber={blockNumber}
+              currentRound={currentCycle}
+              phase={phase}
+              decimals={decimals}
+              symbol={symbol}
+            />
+          ) : null}
+
+          {showActions &&
+          token != null &&
+          collateral != null &&
+          obligation != null &&
+          collateralNeed != null &&
+          installmentNeed != null &&
+          collateralAmount != null &&
+          installmentAmount != null ? (
             <section className="flex flex-col gap-3">
-              {!windowKnown ? <p className="text-sm text-emerald-50/70">Waiting for the latest block timestamp.</p> : null}
-              {windowClosed ? (
-                <p className="text-sm text-emerald-50/70">
-                  This cycle&apos;s window is closed. Join, collateral, payment, and bids are no longer accepted.
-                </p>
-              ) : null}
+              {!windowKnown ? <p className="text-sm text-emerald-50/70">{t("gateWaitingTimestamp")}</p> : null}
+              {windowClosed ? <p className="text-sm text-emerald-50/70">{t("windowClosedActions")}</p> : null}
               {windowKnown && !windowClosed && isMember === false && phase === 0 && currentCycle === 1n ? (
                 <PullAndCall
-                  title="Join and lock collateral"
-                  buttonLabel="Join"
+                  title={t("joinLockTitle")}
+                  buttonLabel={t("joinBtn")}
                   token={token}
                   samity={samity}
                   chainId={chainId}
@@ -561,17 +639,10 @@ export function SamityDesk({ samity }: { samity: Address }) {
                   spends={[
                     {
                       spender: collateral,
-                      need: collateralApprove,
-                      approve: collateralApprove,
+                      need: collateralNeed,
+                      approve: obligation,
                       spentOnSuccess: collateralAmount,
-                      title: "Collateral",
-                    },
-                    {
-                      spender: samity,
-                      need: installmentApprove,
-                      approve: installmentApprove,
-                      spentOnSuccess: 0n,
-                      title: "Installments",
+                      title: t("collateralTitle"),
                     },
                   ]}
                   onRaise={raiseAllowance}
@@ -582,8 +653,8 @@ export function SamityDesk({ samity }: { samity: Address }) {
               ) : null}
               {windowKnown && !windowClosed && isMember && slashed === false && hasLocked === false && phase === 0 ? (
                 <PullAndCall
-                  title="Lock collateral"
-                  buttonLabel="Lock collateral"
+                  title={t("lockTitle")}
+                  buttonLabel={t("lockBtn")}
                   token={token}
                   samity={samity}
                   chainId={chainId}
@@ -594,10 +665,10 @@ export function SamityDesk({ samity }: { samity: Address }) {
                   spends={[
                     {
                       spender: collateral,
-                      need: collateralAmount,
-                      approve: collateralApprove,
+                      need: collateralNeed,
+                      approve: obligation,
                       spentOnSuccess: collateralAmount,
-                      title: "Collateral",
+                      title: t("collateralTitle"),
                     },
                   ]}
                   onRaise={raiseAllowance}
@@ -608,8 +679,8 @@ export function SamityDesk({ samity }: { samity: Address }) {
               ) : null}
               {windowKnown && !windowClosed && isMember && slashed === false && hasLocked === true && hasPaid === false && phase === 0 ? (
                 <PullAndCall
-                  title="Pay installment"
-                  buttonLabel="Pay installment"
+                  title={t("payTitle")}
+                  buttonLabel={t("payBtn")}
                   token={token}
                   samity={samity}
                   chainId={chainId}
@@ -620,10 +691,10 @@ export function SamityDesk({ samity }: { samity: Address }) {
                   spends={[
                     {
                       spender: samity,
-                      need: installmentAmount,
-                      approve: installmentApprove,
+                      need: installmentNeed,
+                      approve: obligation,
                       spentOnSuccess: installmentAmount,
-                      title: "Installments",
+                      title: t("installmentsTitle"),
                     },
                   ]}
                   onRaise={raiseAllowance}
@@ -647,33 +718,55 @@ export function SamityDesk({ samity }: { samity: Address }) {
           {engineReady && bidEngine != null && chainId != null ? (
             <section className="flex flex-col gap-4">
               <p className="break-all text-sm text-emerald-50/70">
-                BidEngine {bidEngine}. canBid:{" "}
+                {t("bidEngineLine", { address: bidEngine })}{" "}
                 {address == null ? (
-                  "connect a wallet"
-                ) : failure(userRows?.[5]) ? (
-                  failure(userRows?.[5])
+                  t("connectLower")
+                ) : failureText(userRows?.[5]) ? (
+                  failureText(userRows?.[5])
                 ) : canBid == null ? (
                   <Skeleton className="inline-block h-3 w-16 align-middle" />
+                ) : canBid ? (
+                  t("yes")
                 ) : (
-                  String(canBid)
+                  t("no")
                 )}
               </p>
               <SealedBidSubmit
                 bidEngine={bidEngine}
                 samity={samity}
                 chainId={chainId}
-                blockedReason={bidSent ? "This wallet already submitted a bid for this cycle." : blockedReason}
+                currentCycle={currentCycle}
+                installmentAmount={installmentAmount ?? null}
+                memberCap={memberCap ?? null}
+                decimals={decimals}
+                symbol={symbol}
+                maxDiscountBps={maxDiscountCap ?? null}
+                onDraftBps={setDraftBps}
+                alreadyOnChain={hasSubmitted === true || bidSent}
+                blockedReason={bidSent ? t("alreadySubmitted") : blockedReason}
                 onDone={() => {
                   setBidSent(true);
                   publish();
                 }}
               />
-              <MyBid bidEngineAddress={bidEngine} />
+              <ChainView
+                bidEngine={bidEngine}
+                chainId={chainId}
+                blockNumber={blockNumber}
+                installmentAmount={installmentAmount ?? null}
+                memberCap={memberCap ?? null}
+                decimals={decimals}
+                symbol={symbol}
+                draftBps={draftBps}
+                unsealedBps={unsealedBps}
+                onUnsealed={setUnsealedBps}
+              />
+              <MyBid bidEngineAddress={bidEngine} onPlaintext={setUnsealedBps} />
             </section>
           ) : (blockNumber == null || publicQuery.isLoading) && publicQuery.data == null ? (
             <Skeleton className="inline-block h-4 w-40" />
           ) : (
-            <p className="text-sm text-emerald-50/70">{failure(rows?.[5]) ?? "BidEngine is unavailable."}</p>
+            <p className="text-sm text-emerald-50/70">{failureText(rows?.[5]) ?? t("bidEngineUnavailable")}</p>
           )}
         </>
       )}
@@ -685,7 +778,7 @@ function Stat({ label, value }: { label: string; value: string }) {
   return (
     <div className="flex flex-col gap-1">
       <p className="text-emerald-50/60">{label}</p>
-      {value === "Reading…" ? (
+      {value === READING ? (
         <Skeleton className="inline-block h-4 w-28" />
       ) : (
         <p className="break-all font-mono text-xs">{value}</p>
@@ -753,6 +846,7 @@ function PullAndCall({
   onClear: (spender: Address) => void;
   onDone: () => void;
 }) {
+  const { t, format } = useI18n();
   const { address } = useAccount();
   const publicClient = usePublicClient({ chainId });
   const { data: walletClient } = useWalletClient({ chainId });
@@ -762,9 +856,10 @@ function PullAndCall({
   const firstQuery = useSpenderAllowance(token, address, first?.spender, chainId, first != null);
   const secondQuery = useSpenderAllowance(token, address, second?.spender, chainId, second != null);
   const [phase, setPhase] = useState<"idle" | "wallet" | "mining">("idle");
-  const [detail, setDetail] = useState<string | null>(null);
+  const [intent, setIntent] = useState<"approve" | "act" | null>(null);
+  const [detail, setDetail] = useState<Notice | null>(null);
   const [hash, setHash] = useState<`0x${string}` | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<unknown>(null);
   const queries = [firstQuery, secondQuery];
   const reads = spends.map((spend, index) => {
     const query = queries[index];
@@ -789,22 +884,28 @@ function PullAndCall({
     }
   }, [firstQuery.data, secondQuery.data, locals, onClear, reads]);
 
-  async function pollAllowances() {
-    for (let attempt = 0; attempt < 8; attempt += 1) {
-      await sleep(1000);
-      if (!alive.current) return;
-      await firstQuery.refetch();
-      if (second) await secondQuery.refetch();
-    }
+  function currentSnapshot() {
+    return spends.map((spend, index) => {
+      const chain = index === 0 ? firstQuery.data : secondQuery.data;
+      const local = locals[spendKey(spend.spender)];
+      return { spend, chain, shown: shownAllowance(chain, local) };
+    });
   }
 
-  async function run() {
+  async function refreshAllowances() {
+    if (!alive.current) return;
+    await firstQuery.refetch();
+    if (second) await secondQuery.refetch();
+  }
+
+  async function approve() {
     if (!address || !publicClient || !walletClient || !first) {
-      setError("Connect a wallet on this chain.");
+      setError(notice("connectWalletOnChain"));
       return;
     }
     setError(null);
     setHash(null);
+    setIntent("approve");
     try {
       const owner = getAddress(address);
       const deadline = await publicClient.readContract({
@@ -813,116 +914,171 @@ function PullAndCall({
         functionName: "cycleDeadline",
       });
       const block = await publicClient.getBlock();
-      if (block.timestamp >= deadline) throw new Error("This cycle's window is closed.");
+      if (block.timestamp >= deadline) throw notice("err_WindowClosed");
 
-      const snapshot = spends.map((spend, index) => {
-        const chain = index === 0 ? firstQuery.data : secondQuery.data;
-        const local = locals[spendKey(spend.spender)];
-        return { spend, chain, shown: shownAllowance(chain, local) };
-      });
+      const snapshot = currentSnapshot();
       if (snapshot.some((item) => item.shown == null)) {
         const failed = reads.find((read) => read.shown == null && read.query?.isError);
-        setError(failed?.query?.error ? errorText(failed.query.error) : "Waiting for the allowance.");
+        setError(failed?.query?.error ?? notice("waitingAllowance"));
+        setIntent(null);
         return;
       }
-      const short = snapshot.filter((item) => (item.shown ?? 0n) < item.spend.need);
-      if (short.length > 0) {
-        for (const item of short) {
-          const approval = encodeErc20Approve(token, item.spend.spender, item.spend.approve);
-          setPhase("wallet");
-          setDetail(`Confirm the ${item.spend.title.toLowerCase()} approval in your wallet.`);
-          await publicClient.call({
-            account: owner,
-            to: approval.to,
-            data: approval.data,
-            value: approval.value,
-          });
-          const approveHash = await sendTransactionHash(walletClient, {
-            account: owner,
-            to: approval.to,
-            data: approval.data,
-            value: approval.value,
-          });
-          setHash(approveHash);
-          setPhase("mining");
-          setDetail(`Waiting for the ${item.spend.title.toLowerCase()} approval.`);
-          await waitForSuccess(publicClient, approveHash);
-          onRaise(item.spend.spender, item.spend.approve);
-        }
-        setPhase("idle");
-        setDetail(null);
-        pushToast("Token approval confirmed.", "ok");
-        void pollAllowances();
+      const item = snapshot.find((entry) => (entry.shown ?? 0n) < entry.spend.need);
+      if (!item) {
+        setIntent(null);
+        return;
+      }
+      const approval = encodeErc20Approve(token, item.spend.spender, item.spend.approve);
+      setPhase("wallet");
+      setDetail(notice("confirmApproval", { title: item.spend.title }));
+      await publicClient.call({
+        account: owner,
+        to: approval.to,
+        data: approval.data,
+        value: approval.value,
+      });
+      const approveHash = await sendTransactionHash(walletClient, {
+        account: owner,
+        to: approval.to,
+        data: approval.data,
+        value: approval.value,
+      });
+      if (!alive.current) return;
+      setHash(approveHash);
+      setPhase("mining");
+      setDetail(notice("waitingApproval", { title: item.spend.title }));
+      await waitForSuccess(publicClient, approveHash);
+      if (!alive.current) return;
+      onRaise(item.spend.spender, item.spend.approve);
+      setPhase("idle");
+      setDetail(null);
+      setIntent(null);
+      pushToast(t("approvalConfirmed"), "ok");
+      await refreshAllowances();
+    } catch (caught) {
+      if (!alive.current) return;
+      setPhase("idle");
+      setDetail(null);
+      setIntent(null);
+      setError(caught);
+      pushToast(format(caught), "err");
+    }
+  }
+
+  async function act() {
+    if (!address || !publicClient || !walletClient || !first) {
+      setError(notice("connectWalletOnChain"));
+      return;
+    }
+    setError(null);
+    setHash(null);
+    setIntent("act");
+    try {
+      const owner = getAddress(address);
+      const deadline = await publicClient.readContract({
+        address: samity,
+        abi: samityAbi,
+        functionName: "cycleDeadline",
+      });
+      const block = await publicClient.getBlock();
+      if (block.timestamp >= deadline) throw notice("err_WindowClosed");
+
+      const snapshot = currentSnapshot();
+      if (snapshot.some((item) => item.shown == null)) {
+        const failed = reads.find((read) => read.shown == null && read.query?.isError);
+        setError(failed?.query?.error ?? notice("waitingAllowance"));
+        setIntent(null);
+        return;
+      }
+      if (snapshot.some((item) => (item.shown ?? 0n) < item.spend.need)) {
+        setError(notice("allowanceBelow"));
+        setIntent(null);
         return;
       }
 
       setPhase("wallet");
-      setDetail(`Confirm ${buttonLabel} in your wallet.`);
+      setDetail(notice("confirmNamed", { action: buttonLabel }));
       const data = encodeFunctionData({ abi: samityAbi, functionName });
       const txHash = await sendTransactionHash(walletClient, { account: owner, to: samity, data });
+      if (!alive.current) return;
       setHash(txHash);
       setPhase("mining");
-      setDetail(`Waiting for ${buttonLabel}.`);
+      setDetail(notice("waitingNamed", { action: buttonLabel }));
       await waitForSuccess(publicClient, txHash);
+      if (!alive.current) return;
       for (const item of snapshot) {
         if (item.spend.spentOnSuccess > 0n) onSpend(item.spend.spender, item.spend.spentOnSuccess, item.chain);
       }
       const doneText =
-        functionName === "join" ? "Joined the samity." : functionName === "lockCollateral" ? "Collateral locked." : "Installment paid.";
+        functionName === "join" ? t("joined") : functionName === "lockCollateral" ? t("collateralLocked") : t("installmentPaid");
       onDone();
       setPhase("idle");
       setDetail(null);
+      setIntent(null);
       pushToast(doneText, "ok");
-      void pollAllowances();
+      await refreshAllowances();
     } catch (caught) {
+      if (!alive.current) return;
       setPhase("idle");
       setDetail(null);
-      const message = errorText(caught);
-      setError(message);
-      pushToast(message, "err");
+      setIntent(null);
+      setError(caught);
+      pushToast(format(caught), "err");
     }
   }
+
+  const priced = (amount: bigint) => amountText(amount, decimals, symbol, t("reading"), t("maxAllowance"));
 
   return (
     <div className="flex flex-col gap-2 rounded-2xl samity-card border border-emerald-200/70 bg-emerald-950/40 p-5 text-sm">
       <p className="font-semibold">{title}</p>
       <p className="text-emerald-50/70">
-        {needsApproval
-          ? "One approval covers this samity. Pay installment will not ask for another approval. "
-          : null}
         {reads.map((read) => {
           const short = read.shown != null && read.shown < read.spend.need;
           return (
             <span key={read.spend.spender}>
-              {read.spend.title}{" "}
+              {t("allowanceLead", { title: read.spend.title })}{" "}
               {read.shown == null ? (
                 read.query?.isError && read.query.data == null ? (
-                  errorText(read.query.error)
+                  format(read.query.error)
                 ) : (
                   <Skeleton className="inline-block h-3 w-24 align-middle" />
                 )
               ) : (
-                amountText(read.shown, decimals, symbol)
+                priced(read.shown)
               )}
-              {short ? ` · approving ${amountText(read.spend.approve, decimals, symbol)}` : ""}
-              .{" "}
+              {". "}
+              {t("allowancePull", { need: priced(read.spend.need) })}
+              {short ? ` ${t("approveFull", { amount: priced(read.spend.approve) })}` : ""}{" "}
             </span>
           );
         })}
       </p>
+      {needsApproval ? (
+        <button
+          type="button"
+          className="w-full rounded-lg bg-emerald-400 px-4 py-2 text-sm font-semibold text-emerald-950 disabled:opacity-40"
+          disabled={busy || waitingAllowance}
+          onClick={() => {
+            void approve();
+          }}
+        >
+          {busy && intent === "approve" ? t("waiting") : t("approve")}
+        </button>
+      ) : null}
       <button
         type="button"
         className="w-full rounded-lg bg-emerald-400 px-4 py-2 text-sm font-semibold text-emerald-950 disabled:opacity-40"
-        disabled={busy || waitingAllowance}
+        disabled={busy || waitingAllowance || needsApproval}
         onClick={() => {
-          void run();
+          void act();
         }}
       >
-        {busy ? "Waiting…" : needsApproval ? "Approve and continue" : buttonLabel}
+        {busy && intent === "act" ? t("waiting") : buttonLabel}
       </button>
-      {detail ? <p className="text-emerald-50/70">{detail}</p> : null}
+      {detail ? <p className="text-emerald-50/70">{format(detail)}</p> : null}
       {hash ? <p className="break-all font-mono text-xs">{hash}</p> : null}
-      {error ? <p className="text-red-300">{error}</p> : null}
+      {error ? <p className="text-red-300">{format(error)}</p> : null}
     </div>
   );
 }
@@ -940,19 +1096,20 @@ function CloseCycle({
   windowClosed: boolean;
   onDone: () => void;
 }) {
+  const { t, format } = useI18n();
   const { address } = useAccount();
   const publicClient = usePublicClient({ chainId });
   const { data: walletClient } = useWalletClient({ chainId });
   const [phase, setPhase] = useState<"idle" | "wallet" | "mining">("idle");
-  const [detail, setDetail] = useState<string | null>(null);
+  const [detail, setDetail] = useState<Notice | null>(null);
   const [hash, setHash] = useState<`0x${string}` | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<unknown>(null);
   const [done, setDone] = useState(false);
   const busy = phase !== "idle";
 
   async function close() {
     if (!address || !publicClient || !walletClient) {
-      setError("Connect a wallet on this chain.");
+      setError(notice("connectWalletOnChain"));
       return;
     }
     setError(null);
@@ -960,7 +1117,7 @@ function CloseCycle({
     try {
       const data = encodeFunctionData({ abi: samityAbi, functionName: "closeCycle" });
       setPhase("wallet");
-      setDetail("Confirm close cycle in your wallet.");
+      setDetail(notice("confirmClose"));
       const txHash = await sendTransactionHash(walletClient, {
         account: getAddress(address),
         to: samity,
@@ -968,31 +1125,26 @@ function CloseCycle({
       });
       setHash(txHash);
       setPhase("mining");
-      setDetail("Waiting for close cycle.");
+      setDetail(notice("waitingClose"));
       await waitForSuccess(publicClient, txHash);
       setDone(true);
       setPhase("idle");
-      setDetail("Cycle closed.");
-      pushToast("Cycle closed.", "ok");
+      setDetail(notice("cycleClosed"));
+      pushToast(t("cycleClosed"), "ok");
       onDone();
     } catch (caught) {
       setPhase("idle");
       setDetail(null);
-      const message = errorText(caught);
-      setError(message);
-      pushToast(message, "err");
+      setError(caught);
+      pushToast(format(caught), "err");
     }
   }
 
   return (
     <div className="flex flex-col gap-2 rounded-2xl samity-card border border-emerald-200/70 bg-emerald-950/40 p-5 text-sm">
-      <p className="font-semibold">Close the bidding window</p>
+      <p className="font-semibold">{t("closeTitle")}</p>
       <p className="text-emerald-50/70">
-        {!blockReady
-          ? "Waiting for the latest block timestamp."
-          : windowClosed
-            ? "The latest block is at or past the deadline."
-            : "The latest block is still before the deadline."}
+        {!blockReady ? t("closeWaitingBlock") : windowClosed ? t("closePast") : t("closeBefore")}
       </p>
       <button
         type="button"
@@ -1002,43 +1154,79 @@ function CloseCycle({
           void close();
         }}
       >
-        {busy ? "Waiting…" : done ? "Cycle closed" : "Close cycle"}
+        {busy ? t("waiting") : done ? t("cycleClosed") : t("closeBtn")}
       </button>
-      {detail ? <p className="text-emerald-50/70">{detail}</p> : null}
+      {detail ? <p className="text-emerald-50/70">{format(detail)}</p> : null}
       {hash ? <p className="break-all font-mono text-xs">{hash}</p> : null}
-      {error ? <p className="text-red-300">{error}</p> : null}
+      {error ? <p className="text-red-300">{format(error)}</p> : null}
     </div>
   );
 }
+
+type BidSubmitStatus =
+  | "checkingMembership"
+  | "checkingEncrypted"
+  | "confirmSubmit"
+  | "waitingSubmit"
+  | "bidSubmitted";
 
 function SealedBidSubmit({
   bidEngine,
   samity,
   chainId,
+  currentCycle,
+  installmentAmount,
+  memberCap,
+  decimals,
+  symbol,
+  maxDiscountBps,
+  onDraftBps,
+  alreadyOnChain,
   blockedReason,
   onDone,
 }: {
   bidEngine: Address;
   samity: Address;
   chainId: number;
+  currentCycle: bigint | undefined;
+  installmentAmount: bigint | null;
+  memberCap: bigint | null;
+  decimals: number | undefined;
+  symbol: string | undefined;
+  maxDiscountBps: number | null;
+  onDraftBps: (bps: bigint | null) => void;
+  alreadyOnChain: boolean;
   blockedReason: string | null;
   onDone: () => void;
 }) {
+  const { t, format } = useI18n();
   const { address } = useAccount();
   const publicClient = usePublicClient({ chainId });
   const { data: walletClient } = useWalletClient({ chainId });
-  const [status, setStatus] = useState<string | null>(null);
+  const [status, setStatus] = useState<BidSubmitStatus | null>(null);
   const [hash, setHash] = useState<`0x${string}` | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<unknown>(null);
+  const seenRound = useRef<{ engine: Address; cycle: bigint | undefined } | null>(null);
+
+  useEffect(() => {
+    const previous = seenRound.current;
+    seenRound.current = { engine: bidEngine, cycle: currentCycle };
+    if (previous == null) return;
+    if (previous.engine === bidEngine && previous.cycle === currentCycle) return;
+    if (previous.engine === bidEngine && previous.cycle == null) return;
+    setStatus(null);
+    setHash(null);
+    setError(null);
+  }, [bidEngine, currentCycle]);
 
   async function onSealed(sealed: { handle: `0x${string}`; proof: `0x${string}` }, client: PublicClient) {
     if (!address || !walletClient) {
-      setError("Connect the wallet that sealed this bid.");
+      setError(notice("connectSealed"));
       return;
     }
     setError(null);
     setHash(null);
-    setStatus("Checking membership and the bidding window.");
+    setStatus("checkingMembership");
     try {
       const owner = getAddress(address);
       const engine = getAddress(bidEngine);
@@ -1050,21 +1238,11 @@ function SealedBidSubmit({
         client.readContract({ address: samity, abi: samityAbi, functionName: "canBid", args: [owner] }),
         client.getBlock(),
       ]);
-      if (!member) {
-        throw new Error("This wallet is not registered in the samity. Join before bidding.");
-      }
-      if (block.timestamp >= deadline) {
-        throw new Error("This cycle's window is closed.");
-      }
-      if (!paid) {
-        throw new Error("Pay the installment before bidding.");
-      }
-      if (submitted) {
-        throw new Error("This wallet already submitted a bid for this cycle.");
-      }
-      if (!allowed) {
-        throw new Error("This account cannot bid right now.");
-      }
+      if (!member) throw notice("notRegistered");
+      if (block.timestamp >= deadline) throw notice("err_WindowClosed");
+      if (!paid) throw notice("gatePayFirst");
+      if (submitted) throw notice("alreadySubmitted");
+      if (!allowed) throw notice("gateCannotBid");
       // `externalEuint32` is a bytes32. The second argument is the 65-byte
       // batch signature, bound to this wallet and this BidEngine.
       const data = encodeFunctionData({
@@ -1072,7 +1250,7 @@ function SealedBidSubmit({
         functionName: "submitBid",
         args: [sealed.handle, sealed.proof],
       });
-      setStatus("Checking the encrypted bid.");
+      setStatus("checkingEncrypted");
       await client.simulateContract({
         address: engine,
         abi: bidEngineAbi,
@@ -1080,7 +1258,7 @@ function SealedBidSubmit({
         args: [sealed.handle, sealed.proof],
         account: owner,
       });
-      setStatus("Confirm submitBid in your wallet.");
+      setStatus("confirmSubmit");
       const txHash = await sendTransactionHash(walletClient, {
         account: owner,
         to: engine,
@@ -1088,39 +1266,45 @@ function SealedBidSubmit({
         value: 0n,
       });
       setHash(txHash);
-      setStatus("Waiting for submitBid.");
+      setStatus("waitingSubmit");
       await waitForSuccess(client, txHash);
-      setStatus("Bid submitted.");
-      pushToast("Bid submitted.", "ok");
+      setStatus("bidSubmitted");
+      pushToast(t("bidSubmitted"), "ok");
       onDone();
     } catch (caught) {
       setStatus(null);
-      const message = errorText(caught);
-      setError(message);
-      pushToast(message, "err");
+      setError(caught);
+      pushToast(format(caught), "err");
     }
   }
 
   return (
     <div className="flex flex-col gap-3">
       <SealBid
+        key={`${bidEngine}-${currentCycle?.toString() ?? "cycle"}`}
         bidEngineAddress={bidEngine}
+        installmentAmount={installmentAmount}
+        memberCap={memberCap}
+        decimals={decimals}
+        symbol={symbol}
+        maxDiscountBps={maxDiscountBps}
+        onDraftBps={onDraftBps}
+        chainPending={status != null && status !== "bidSubmitted"}
+        chainConfirmed={status === "bidSubmitted"}
+        alreadyOnChain={alreadyOnChain}
         disabledReason={blockedReason}
         onSealed={(sealed) => {
-          if (blockedReason) {
-            setError(blockedReason);
-            return;
-          }
+          if (blockedReason) return;
           if (!publicClient) {
-            setError("No public client for this chain.");
+            setError(notice("noPublicClient"));
             return;
           }
           void onSealed(sealed, publicClient);
         }}
       />
-      {status ? <p className="text-sm text-emerald-50/70">{status}</p> : null}
+      {status ? <p className="text-sm text-emerald-50/70">{t(status)}</p> : null}
       {hash ? <p className="break-all font-mono text-xs">{hash}</p> : null}
-      {error ? <p className="text-sm text-red-300">{error}</p> : null}
+      {error ? <p className="text-sm text-red-300">{format(error)}</p> : null}
     </div>
   );
 }

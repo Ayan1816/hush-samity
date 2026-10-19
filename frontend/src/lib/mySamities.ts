@@ -291,6 +291,18 @@ function readFromBlock(chainId: number): bigint | null {
   return BigInt(parsed);
 }
 
+/** Earliest block this browser has saved for a samity scan on `chainId`. */
+export function readKnownFromBlock(chainId: number): bigint | null {
+  return readFromBlock(chainId);
+}
+
+/** Deployment block saved when this account deployed or recorded `samity`. */
+export function readDeployedBlock(chainId: number, account: Address, samity: Address): bigint | null {
+  const row = readDeployedStored(chainId, account).find((item) => item.address.toLowerCase() === samity.toLowerCase());
+  if (!row) return null;
+  return BigInt(row.blockNumber);
+}
+
 function writeFromBlock(chainId: number, blockNumber: bigint): void {
   if (blockNumber <= 0n) return;
   const current = readFromBlock(chainId);

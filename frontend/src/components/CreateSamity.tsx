@@ -10,7 +10,8 @@ import { Skeleton } from "@/src/components/Skeleton";
 import { pushToast } from "@/src/components/Toast";
 import { erc20Abi, samityAbi } from "@/src/lib/abis";
 import { isSupportedChainId } from "@/src/config/cofhe";
-import { errorText } from "@/src/lib/errors";
+import { useI18n } from "@/src/i18n/LanguageProvider";
+import { notice, type Notice } from "@/src/i18n/messages";
 import { mySamitiesQueryKey, rememberDeployedSamity } from "@/src/lib/mySamities";
 import { waitForSuccess } from "@/src/lib/receipt";
 
@@ -56,33 +57,33 @@ function tokenAmount(label: string, raw: string, decimals: number): bigint {
   }
 }
 
-function bpsConversion(raw: string): string | null {
+function bpsConversion(raw: string): { bps: string; percent: string } | null {
   const trimmed = raw.trim();
   if (!/^\d+$/.test(trimmed)) return null;
   const bps = Number(trimmed);
   if (!Number.isSafeInteger(bps)) return null;
   const percent = bps / 100;
   const percentText = Number.isInteger(percent) ? String(percent) : percent.toFixed(2).replace(/\.?0+$/, "");
-  return `${trimmed} bps = ${percentText}%`;
+  return { bps: trimmed, percent: percentText };
 }
 
-function amountError(label: string, raw: string, decimals: number | undefined, submitted: boolean): string | null {
+function amountError(label: string, raw: string, decimals: number | undefined, submitted: boolean): Notice | null {
   const trimmed = raw.trim();
-  if (trimmed === "") return submitted ? `Enter ${label.toLowerCase()}.` : null;
+  if (trimmed === "") return submitted ? notice("errEnterField", { label }) : null;
   if (decimals == null) return null;
   try {
     tokenAmount(label, trimmed, decimals);
     return null;
   } catch (error) {
-    return errorText(error);
+    if (error instanceof Error && error.message.includes("greater than zero")) return notice("errGreaterThanZero", { label });
+    return notice("errDecimals", { label, decimals: decimals ?? 0 });
   }
 }
 
-function membersError(raw: string, submitted: boolean): string | null {
+function membersError(raw: string, submitted: boolean): Notice | null {
   const trimmed = raw.trim();
-  if (trimmed === "") return submitted ? "Enter members and cycles." : null;
-  if (!/^\d+$/.test(trimmed)) return "Members and cycles must be a whole number greater than zero.";
-  if (BigInt(trimmed) === 0n) return "Members and cycles must be a whole number greater than zero.";
+  if (trimmed === "") return submitted ? notice("errEnterMembers") : null;
+  if (!/^\d+$/.test(trimmed) || BigInt(trimmed) === 0n) return notice("errMembers");
   return null;
 }
 
@@ -95,11 +96,11 @@ function durationSeconds(mode: DurationMode, custom: string): bigint | null {
   return value === 0n ? null : value;
 }
 
-function durationError(mode: DurationMode, custom: string, submitted: boolean): string | null {
+function durationError(mode: DurationMode, custom: string, submitted: boolean): Notice | null {
   if (mode !== "custom") return null;
   const trimmed = custom.trim();
-  if (trimmed === "") return submitted ? "Enter the cycle length in seconds." : null;
-  if (!/^\d+$/.test(trimmed) || BigInt(trimmed) === 0n) return "Cycle duration must be a whole number of seconds greater than zero.";
+  if (trimmed === "") return submitted ? notice("errEnterSeconds") : null;
+  if (!/^\d+$/.test(trimmed) || BigInt(trimmed) === 0n) return notice("errCycleSeconds");
   return null;
 }
 
@@ -129,14 +130,12 @@ function tokenText(amount: bigint | null, decimals: number | undefined, symbol: 
   return symbol ? `${formatted} ${symbol}` : formatted;
 }
 
-function discountError(raw: string, submitted: boolean): string | null {
+function discountError(raw: string, submitted: boolean): Notice | null {
   const trimmed = raw.trim();
-  if (trimmed === "") return submitted ? "Enter a max discount." : null;
-  if (!/^\d+$/.test(trimmed)) return "Max discount must be a whole number of basis points.";
+  if (trimmed === "") return submitted ? notice("errEnterDiscount") : null;
+  if (!/^\d+$/.test(trimmed)) return notice("errDiscountWhole");
   const value = Number(trimmed);
-  if (!Number.isSafeInteger(value) || value < 1 || value > MAX_DISCOUNT_BPS) {
-    return "Max discount must be between 1 and 10000 basis points.";
-  }
+  if (!Number.isSafeInteger(value) || value < 1 || value > MAX_DISCOUNT_BPS) return notice("errDiscountRange");
   return null;
 }
 
@@ -169,6 +168,7 @@ function stepMark(phase: DeployPhase, id: (typeof DEPLOY_STEPS)[number]["id"]): 
 }
 
 export function CreateSamity() {
+  const { t, format } = useI18n();
   const queryClient = useQueryClient();
   const { address, chainId, isConnected } = useAccount();
   const publicClient = usePublicClient();
@@ -181,7 +181,7 @@ export function CreateSamity() {
   const [phase, setPhase] = useState<DeployPhase>("idle");
   const [txHash, setTxHash] = useState<`0x${string}` | null>(null);
   const [deployedAddress, setDeployedAddress] = useState<Address | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<unknown>(null);
 
   const trimmedToken = token.trim();
   const tokenIsAddress = isAddress(trimmedToken);
@@ -232,39 +232,43 @@ export function CreateSamity() {
     !metaQuery.isError &&
     ((codeQuery.isFetched && !hasCode) || (hasCode && metaQuery.isFetched && !metaReady));
 
-  const installmentError = amountError("Installment", fields.installment, decimals, submitted);
-  const collateralError = amountError("Collateral", fields.collateral, decimals, submitted);
-  const membersFieldError = membersError(fields.members, submitted);
-  const cycleError = durationError(durationMode, fields.customDuration, submitted);
-  const discountFieldError = discountError(fields.maxDiscountCap, submitted);
-  const discountHint = bpsConversion(fields.maxDiscountCap);
+  const installmentLabel = t("installment");
+  const collateralLabel = t("collateral");
+  const installmentIssue = amountError(installmentLabel, fields.installment, decimals, submitted);
+  const collateralIssue = amountError(collateralLabel, fields.collateral, decimals, submitted);
+  const membersIssue = membersError(fields.members, submitted);
+  const cycleIssue = durationError(durationMode, fields.customDuration, submitted);
+  const discountIssue = discountError(fields.maxDiscountCap, submitted);
+  const discountParts = bpsConversion(fields.maxDiscountCap);
+  const discountHint = discountParts ? t("bpsHint", discountParts) : null;
+  const show = (issue: Notice | null) => (issue ? format(issue) : null);
 
-  const tokenFormatError =
+  const tokenFormatError: Notice | null =
     trimmedToken === ""
       ? null
       : !tokenIsAddress
-        ? "Enter a valid token address (0x…)."
+        ? notice("enterValidToken")
         : trimmedToken === zeroAddress
-          ? "The zero address is not an ERC-20 contract."
+          ? notice("zeroNotErc20")
           : canRead && !readingToken && codeQuery.isError
-            ? errorText(codeQuery.error)
+            ? notice("errRaw", { text: format(codeQuery.error) })
             : canRead && !readingToken && hasCode && metaQuery.isError
-              ? errorText(metaQuery.error)
+              ? notice("errRaw", { text: format(metaQuery.error) })
               : tokenCallFailed
-                ? "This address is not an ERC-20 contract."
+                ? notice("notErc20")
                 : null;
 
-  let blockReason: string | null = null;
-  if (!isConnected) blockReason = "Connect wallet first";
-  else if (!isSupportedChainId(chainId)) blockReason = "Switch to Sepolia";
-  else if (tokenAddress == null) blockReason = "Enter token address";
-  else if (readingToken) blockReason = "Reading token from the chain…";
+  let blockReason: Notice | null = null;
+  if (!isConnected) blockReason = notice("connectWalletFirst");
+  else if (!isSupportedChainId(chainId)) blockReason = notice("switchToSepolia");
+  else if (tokenAddress == null) blockReason = notice("enterTokenAddress");
+  else if (readingToken) blockReason = notice("readingToken");
   else if (tokenFormatError) blockReason = tokenFormatError;
-  else if (!metaReady || decimals == null) blockReason = "This address is not an ERC-20 contract.";
+  else if (!metaReady || decimals == null) blockReason = notice("notErc20");
   else
     blockReason =
-      amountError("Installment", fields.installment, decimals, true) ??
-      amountError("Collateral", fields.collateral, decimals, true) ??
+      amountError(installmentLabel, fields.installment, decimals, true) ??
+      amountError(collateralLabel, fields.collateral, decimals, true) ??
       membersError(fields.members, true) ??
       discountError(fields.maxDiscountCap, true);
 
@@ -296,8 +300,8 @@ export function CreateSamity() {
       return;
     }
     if (
-      amountError("Installment", fields.installment, decimals, true) ||
-      amountError("Collateral", fields.collateral, decimals, true) ||
+      amountError(installmentLabel, fields.installment, decimals, true) ||
+      amountError(collateralLabel, fields.collateral, decimals, true) ||
       membersError(fields.members, true) ||
       durationError(durationMode, fields.customDuration, true) ||
       discountError(fields.maxDiscountCap, true)
@@ -305,11 +309,11 @@ export function CreateSamity() {
       return;
     }
 
-    const installment = tokenAmount("Installment", fields.installment, decimals);
-    const collateral = tokenAmount("Collateral", fields.collateral, decimals);
-    const members = wholeNumber("Members and cycles", fields.members);
+    const installment = tokenAmount(installmentLabel, fields.installment, decimals);
+    const collateral = tokenAmount(collateralLabel, fields.collateral, decimals);
+    const members = wholeNumber(t("membersCycles"), fields.members);
     const cycleDuration = durationSeconds(durationMode, fields.customDuration);
-    const maxDiscountCap = wholeNumber("Max discount", fields.maxDiscountCap);
+    const maxDiscountCap = wholeNumber(t("maxDiscount"), fields.maxDiscountCap);
     if (cycleDuration == null || members === 0n || maxDiscountCap < 1n || maxDiscountCap > BigInt(MAX_DISCOUNT_BPS)) {
       return;
     }
@@ -321,7 +325,7 @@ export function CreateSamity() {
       const response = await fetch("/api/samity-bytecode");
       const body = (await response.json()) as { bytecode?: string; error?: string };
       if (!response.ok || typeof body.bytecode !== "string" || !body.bytecode.startsWith("0x")) {
-        throw new Error(body.error ?? "The Samity bytecode response was empty.");
+        throw body.error ? new Error(body.error) : notice("bytecodeEmpty");
       }
 
       setPhase("confirm");
@@ -335,7 +339,7 @@ export function CreateSamity() {
       setPhase("deploying");
       const receipt = await waitForSuccess(publicClient, hash);
       if (!receipt.contractAddress) {
-        throw new Error("The deployment transaction did not return a contract address.");
+        throw notice("noContractAddress");
       }
       setDeployedAddress(receipt.contractAddress);
       setPhase("done");
@@ -357,12 +361,11 @@ export function CreateSamity() {
         });
         queryClient.setQueryData(mySamitiesQueryKey(chainId, address), saved);
       }
-      pushToast("Samity deployed.", "ok");
+      pushToast(t("samityDeployed"), "ok");
     } catch (caught) {
       setPhase("idle");
-      const message = errorText(caught);
-      setError(message);
-      pushToast(message, "err");
+      setError(caught);
+      pushToast(format(caught), "err");
     }
   }
 
@@ -372,22 +375,19 @@ export function CreateSamity() {
       className="flex scroll-mt-8 flex-col gap-4 rounded-2xl samity-card border border-emerald-200/70 bg-emerald-950/40 p-5"
     >
       <header className="flex flex-col gap-1">
-        <h2 className="text-lg font-semibold">Create a new samity</h2>
-        <p className="text-sm text-emerald-50/70">
-          Deploys <span className="font-mono">Samity</span> with your account as creator. The discount cap is fixed in
-          that transaction. Amounts use the token&apos;s on-chain decimals.
-        </p>
+        <h2 className="text-lg font-semibold">{t("createTitle")}</h2>
+        <p className="text-sm text-emerald-50/70">{t("createBody")}</p>
       </header>
 
       <label className="flex flex-col gap-2 text-sm">
         <span className="flex items-baseline justify-between gap-3">
-          <span>Contribution ERC-20</span>
+          <span>{t("contributionToken")}</span>
           <button
             type="button"
             className="text-xs font-medium text-emerald-200 underline-offset-2 hover:underline"
             onClick={() => setToken(TEST_TUSD)}
           >
-            Autofill Test TUSD
+            {t("autofillTusd")}
           </button>
         </span>
         <input
@@ -401,24 +401,24 @@ export function CreateSamity() {
           onChange={(event) => setToken(event.target.value)}
         />
         <span id="contribution-token-help" className="text-xs text-emerald-50/60">
-          Enter the token contract address. Ask your community admin for the specific address.
+          {t("tokenHelp")}
         </span>
-        {tokenFormatError ? <span className="text-sm text-red-300">{tokenFormatError}</span> : null}
+        {tokenFormatError ? <span className="text-sm text-red-300">{format(tokenFormatError)}</span> : null}
         {metaReady ? (
           <span className="text-sm text-emerald-50/80">
-            {tokenName} · {tokenSymbol} · {decimals} decimals
+            {t("decimalsMeta", { name: tokenName ?? "", symbol: tokenSymbol ?? "", decimals: decimals ?? "" })}
             {balanceQuery.isLoading ? (
               <>
-                {" · Balance "}
-                <Skeleton className="inline-block h-3 w-16 align-middle" />
+                {" · "}
+                {t("balanceWord")} <Skeleton className="inline-block h-3 w-16 align-middle" />
               </>
             ) : balanceText ? (
-              ` · Balance ${balanceText}`
+              ` · ${t("balanceMeta", { amount: balanceText })}`
             ) : null}
           </span>
         ) : null}
         {metaReady && balanceQuery.isError ? (
-          <span className="text-sm text-red-300">Could not read your balance. {errorText(balanceQuery.error)}</span>
+          <span className="text-sm text-red-300">{t("couldNotReadBalance", { detail: format(balanceQuery.error) })}</span>
         ) : null}
         {canRead && readingToken ? (
           <span aria-busy="true">
@@ -429,49 +429,49 @@ export function CreateSamity() {
 
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
         <TextField
-          label="Installment"
+          label={t("installment")}
           value={fields.installment}
           placeholder="100"
           inputMode="decimal"
-          error={installmentError}
+          error={show(installmentIssue)}
           onChange={(value) => setField("installment", value)}
         />
         <TextField
-          label="Collateral"
+          label={t("collateral")}
           value={fields.collateral}
           placeholder="200"
           inputMode="decimal"
-          error={collateralError}
+          error={show(collateralIssue)}
           onChange={(value) => setField("collateral", value)}
         />
         <TextField
-          label="Members & Cycles"
-          detail="Each member wins once, so this number is both the member cap and the number of cycles."
+          label={t("membersCycles")}
+          detail={t("membersCyclesDetail")}
           value={fields.members}
           placeholder="5"
           inputMode="numeric"
-          error={membersFieldError}
+          error={show(membersIssue)}
           onChange={(value) => setField("members", value)}
         />
         <TextField
-          label="Max discount (basis points)"
+          label={t("maxDiscountLabel")}
           hint={discountHint}
           value={fields.maxDiscountCap}
           placeholder="500"
           inputMode="numeric"
-          error={discountFieldError}
+          error={show(discountIssue)}
           onChange={(value) => setField("maxDiscountCap", value)}
         />
       </div>
 
       <fieldset className="flex flex-col gap-2 text-sm">
-        <legend>Cycle duration</legend>
+        <legend>{t("cycleDuration")}</legend>
         <div className="grid grid-cols-3 gap-2">
           {(
             [
-              ["weekly", "Weekly"],
-              ["monthly", "Monthly"],
-              ["custom", "Custom"],
+              ["weekly", t("weekly")],
+              ["monthly", t("monthly")],
+              ["custom", t("custom")],
             ] as const
           ).map(([mode, label]) => (
             <button
@@ -485,15 +485,15 @@ export function CreateSamity() {
             </button>
           ))}
         </div>
-        {durationMode === "weekly" ? <p className="text-emerald-50/70">{WEEK_SECONDS} seconds (7 days)</p> : null}
-        {durationMode === "monthly" ? <p className="text-emerald-50/70">{MONTH_SECONDS} seconds (30 days)</p> : null}
+        {durationMode === "weekly" ? <p className="text-emerald-50/70">{t("seconds7", { seconds: WEEK_SECONDS })}</p> : null}
+        {durationMode === "monthly" ? <p className="text-emerald-50/70">{t("seconds30", { seconds: MONTH_SECONDS })}</p> : null}
         {durationMode === "custom" ? (
           <TextField
-            label="Custom duration (seconds)"
+            label={t("customDuration")}
             value={fields.customDuration}
             placeholder="604800"
             inputMode="numeric"
-            error={cycleError}
+            error={show(cycleIssue)}
             onChange={(value) => setField("customDuration", value)}
           />
         ) : null}
@@ -503,23 +503,20 @@ export function CreateSamity() {
         className="grid grid-cols-1 gap-3 rounded-xl border border-emerald-200/20 bg-black/20 p-4 sm:grid-cols-2"
         aria-busy={summaryLoading}
       >
-        <SummaryStat label="Pool per round" value={tokenText(poolPerRound, decimals, tokenSymbol)} loading={summaryLoading} />
+        <SummaryStat label={t("poolPerRound")} value={tokenText(poolPerRound, decimals, tokenSymbol)} loading={summaryLoading} />
         <SummaryStat
-          label="Total obligation per member"
+          label={t("totalObligation")}
           value={tokenText(obligation, decimals, tokenSymbol)}
           loading={summaryLoading}
         />
-        <SummaryStat label="Collateral" value={tokenText(collateralBase, decimals, tokenSymbol)} loading={summaryLoading} />
+        <SummaryStat label={t("collateral")} value={tokenText(collateralBase, decimals, tokenSymbol)} loading={summaryLoading} />
         <SummaryStat
-          label="Max discount"
+          label={t("maxDiscount")}
           value={tokenText(maxDiscountTokens, decimals, tokenSymbol)}
           loading={summaryLoading}
         />
       </div>
-      <p className="text-xs text-emerald-50/60">
-        Pool per round is the installment times the member count. Total obligation is the installment times the cycles.
-        Max discount is that basis-point share of the pool. Amounts use this token&apos;s decimals and symbol.
-      </p>
+      <p className="text-xs text-emerald-50/60">{t("summaryFoot")}</p>
 
       <button
         type="button"
@@ -533,7 +530,7 @@ export function CreateSamity() {
           void deploy();
         }}
       >
-        {phase === "confirm" ? "Confirm in wallet" : phase === "deploying" ? "Deploying" : (blockReason ?? "Deploy samity")}
+        {phase === "confirm" ? t("confirmInWalletPlain") : phase === "deploying" ? t("deploying") : blockReason ? format(blockReason) : t("deploySamity")}
       </button>
 
       {phase !== "idle" ? (
@@ -542,7 +539,8 @@ export function CreateSamity() {
             const mark = stepMark(phase, step.id);
             return (
               <li key={step.id} className={mark === "upcoming" ? "text-emerald-50/40" : "text-emerald-50"}>
-                {mark === "complete" ? "Complete" : mark === "current" ? "Current" : "Waiting"} · {step.label}
+                {mark === "complete" ? t("markComplete") : mark === "current" ? t("markCurrent") : t("markWaiting")} ·{" "}
+                {step.id === "confirm" ? t("confirmInWalletPlain") : step.id === "deploying" ? t("deploying") : t("done")}
               </li>
             );
           })}
@@ -550,15 +548,15 @@ export function CreateSamity() {
       ) : null}
       {txUrl ? (
         <a className="break-all font-mono text-xs text-emerald-200 underline" href={txUrl} target="_blank" rel="noreferrer">
-          View transaction
+          {t("viewTransaction")}
         </a>
       ) : null}
       {deployedAddress ? (
         <Link className="text-sm text-emerald-200 underline" href={`/samity/${deployedAddress}`}>
-          Open samity
+          {t("openSamity")}
         </Link>
       ) : null}
-      {error ? <p className="text-sm text-red-300">{error}</p> : null}
+      {error ? <p className="text-sm text-red-300">{format(error)}</p> : null}
     </section>
   );
 }
